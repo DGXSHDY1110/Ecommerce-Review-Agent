@@ -21,11 +21,21 @@
 - [ ] Walk through the project structure
 - [ ] Highlight key technology choices
 
-### 2. FastAPI Health Check (30 seconds)
+### 2. FastAPI Service Demo (2 minutes)
 
-- [ ] Start server: `uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000`
-- [ ] Open browser: `http://127.0.0.1:8000/docs` (OpenAPI docs)
-- [ ] Call: `curl http://127.0.0.1:8000/api/v1/health`
+- [ ] Start server (mock mode): `LLM_MOCK_MODE=true uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000`
+- [ ] Open browser: `http://127.0.0.1:8000/docs` (OpenAPI docs — Swagger UI)
+- [ ] Show health: `curl http://127.0.0.1:8000/api/v1/health`
+- [ ] Show single analyze via Swagger UI "Try it out" or curl:
+  ```bash
+  curl -X POST http://127.0.0.1:8000/api/v1/analyze \
+    -H "Content-Type: application/json" \
+    -d '{"review_id":"r001","platform":"Amazon","product_name":"Camera","rating":2,"review_text":"Battery drains too fast.","country":"US","created_at":"2026-06-01"}'
+  ```
+- [ ] Show batch analyze via curl or Swagger UI
+- [ ] Run demo script: `python scripts/demo_request.py`
+- [ ] Explain: mock mode uses keywords, real mode calls DeepSeek LLM
+- [ ] Explain: n8n will call these same `/api/v1/analyze` endpoints via HTTP Request nodes
 
 ### 3. Review Classification Demo (2 minutes)
 
