@@ -1,0 +1,11 @@
+review_id,platform,product_name,rating,review_text,country,created_at
+r001,Amazon,Wireless Security Camera,2,"Battery drains too fast and the night vision is blurry. Not worth the price.",US,2026-06-01
+r002,Shopify,Bluetooth Earbuds Pro,1,"Left earbud stopped working after 3 days. Customer service ignored my emails.",DE,2026-06-02
+r003,Amazon,Portable Power Bank 20000mAh,4,"Good capacity, but the charging cable feels cheap. Works fine otherwise.",US,2026-06-03
+r004,Amazon,4K Action Camera,3,"Decent image quality during the day, but the waterproof case leaked on first use.",JP,2026-06-03
+r005,Shopify,Smart Watch Fitness Tracker,2,"Heart rate monitor is very inaccurate. Shows 90 bpm when I'm clearly at 120+.",US,2026-06-04
+r006,Amazon,Mechanical Keyboard RGB,5,"Great build quality, satisfying switches, RGB looks amazing. Highly recommend!",UK,2026-06-04
+r007,Aliexpress,Phone Case iPhone 16,1,"The case doesn't fit at all. Button cutouts are misaligned. Complete waste.",FR,2026-06-04
+r008,Amazon,Wireless Doorbell Camera,2,"Motion detection is too sensitive. Sends 50 notifications a day for passing cars.",US,2026-06-05
+r009,Shopify,Resistance Bands Set,4,"Good quality bands but the included guide has poor English translations.",DE,2026-06-05
+r010,Amazon,Electric Toothbrush UV,3,"Cleans well but the UV sanitizer stopped lighting up after a month. Brush still works.",UK,2026-06-06
