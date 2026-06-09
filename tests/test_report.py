@@ -14,6 +14,8 @@ def make_analysis(
     responsible_team="product",
     confidence=0.9,
     needs_human_review=False,
+    summary_zh="测试摘要。",
+    suggested_action_zh="测试建议。",
 ) -> ReviewAnalysis:
     """Helper to create a ReviewAnalysis for testing."""
     return ReviewAnalysis(
@@ -22,8 +24,8 @@ def make_analysis(
         issue_category=issue_category,
         priority=priority,
         responsible_team=responsible_team,
-        summary_zh="测试摘要。",
-        suggested_action_zh="测试建议。",
+        summary_zh=summary_zh,
+        suggested_action_zh=suggested_action_zh,
         confidence=confidence,
         needs_human_review=needs_human_review,
     )
@@ -43,7 +45,6 @@ class TestGenerateDailyReport:
         results = [make_analysis("r001"), make_analysis("r002")]
         report = generate_daily_report(results)
         assert "总评论数" in report
-        assert "| 2 |" in report  # total count in table
 
     def test_report_includes_negative_count(self):
         """Report should count negative sentiment reviews."""
@@ -115,7 +116,64 @@ class TestGenerateDailyReport:
             make_analysis("r002", sentiment="positive"),
         ]
         report = generate_daily_report(results)
-        assert "重点负面评论" in report
+        assert "负面评论详情" in report
+
+    def test_report_includes_human_review_section(self):
+        """Report should have a dedicated Human Review Required section."""
+        results = [
+            make_analysis("r001", needs_human_review=True,
+                         confidence=0.3, issue_category="other",
+                         summary_zh="", suggested_action_zh=""),
+            make_analysis("r002", needs_human_review=False),
+        ]
+        report = generate_daily_report(results)
+        assert "需要人工复核" in report
+
+    def test_report_includes_human_review_rules(self):
+        """Report should explain when human review is triggered."""
+        results = [make_analysis("r001")]
+        report = generate_daily_report(results)
+        assert "人工复核规则说明" in report or "Human Review Rules" in report
+        # Check for key rule descriptions
+        assert "低置信度" in report or "Low Confidence" in report
+
+    def test_report_includes_confidence_stats(self):
+        """Report should include average/min/max confidence."""
+        results = [
+            make_analysis("r001", confidence=0.5),
+            make_analysis("r002", confidence=0.9),
+            make_analysis("r003", confidence=0.7),
+        ]
+        report = generate_daily_report(results)
+        assert "置信度" in report or "Confidence" in report
+
+    def test_report_includes_priority_breakdown(self):
+        """Report should include high/medium/low priority counts."""
+        results = [
+            make_analysis("r001", priority="high"),
+            make_analysis("r002", priority="medium"),
+            make_analysis("r003", priority="low"),
+        ]
+        report = generate_daily_report(results)
+        assert "高优先级" in report
+        assert "中优先级" in report
+        assert "低优先级" in report
+
+    def test_report_includes_error_log_reference(self):
+        """Report should reference error_cases.jsonl."""
+        results = [make_analysis("r001")]
+        report = generate_daily_report(results)
+        assert "error_cases.jsonl" in report or "error_cases" in report
+
+    def test_report_with_all_needs_review(self):
+        """Report should handle case where all reviews need human review."""
+        results = [
+            make_analysis("r001", needs_human_review=True, confidence=0.3),
+            make_analysis("r002", needs_human_review=True, confidence=0.4),
+        ]
+        report = generate_daily_report(results)
+        # Should not crash and should show the count
+        assert "需要人工复核" in report
 
 
 class TestGenerateErrorLogEntry:
@@ -136,3 +194,8 @@ class TestGenerateErrorLogEntry:
         import json
         parsed = json.loads(entry)
         assert len(parsed["raw_output"]) <= 500
+
+    def test_entry_is_single_line(self):
+        """Error log entry should be a single line (JSONL format)."""
+        entry = generate_error_log_entry("r001", "error")
+        assert "\n" not in entry

@@ -30,6 +30,7 @@ from src.review_agent.schemas import (
 )
 from src.review_agent.workflow import analyze_batch_request
 from src.review_agent.report import generate_daily_report
+from src.review_agent.utils import log_error_case, ensure_output_dir
 
 
 def read_reviews_csv(csv_path: str) -> list[ReviewInput]:
@@ -74,6 +75,18 @@ def save_report(path: str, markdown: str) -> None:
     """Save markdown report to file."""
     with open(path, "w", encoding="utf-8") as f:
         f.write(markdown)
+
+
+def count_error_log_entries() -> int:
+    """Count the number of entries in the error log."""
+    from src.review_agent.utils import ERROR_LOG_PATH
+    try:
+        if not ERROR_LOG_PATH.exists():
+            return 0
+        with open(ERROR_LOG_PATH, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
 
 
 def main() -> None:
@@ -154,6 +167,13 @@ def main() -> None:
         response = analyze_batch_request(request, client=client)
     except Exception as e:
         print(f"❌ Analysis failed: {e}")
+        log_error_case(
+            review_id="batch",
+            error_type="BATCH_FAILURE",
+            error_message=str(e)[:500],
+            fallback_used=True,
+            needs_human_review=True,
+        )
         sys.exit(1)
 
     # Save results
@@ -162,10 +182,11 @@ def main() -> None:
 
     # Generate and save report
     print(f"📝 Generating report: {output_report}")
-    report_md = generate_daily_report(response.results)
+    rating_map = {r.review_id: r.rating for r in reviews}
+    report_md = generate_daily_report(response.results, rating_map=rating_map)
     save_report(output_report, report_md)
 
-    # Summary
+    # ── Final summary ─────────────────────────────────────────────────
     print()
     print("=" * 50)
     print("✅ Batch analysis complete!")
@@ -173,6 +194,54 @@ def main() -> None:
     print(f"   Needs human review:    {response.needs_human_review_count}")
     print(f"   JSON output:           {output_json}")
     print(f"   Report:                {output_report}")
+
+    # ── Human review warning ──────────────────────────────────────────
+    if response.needs_human_review_count > 0:
+        print()
+        print("⚠️ ════════════════════════════════════════════════════")
+        print(f"   ⚠️  {response.needs_human_review_count} 条评论需要人工复核！")
+        print("   ════════════════════════════════════════════════════")
+        print()
+        human_review_items = [
+            r for r in response.results if r.needs_human_review
+        ]
+        print("   需人工复核的评论：")
+        print(f"   {'ID':<8} {'评分':<5} {'情绪':<10} {'类别':<20} {'置信度':<7}")
+        print(f"   {'─'*8} {'─'*5} {'─'*10} {'─'*20} {'─'*7}")
+        for r in human_review_items[:20]:  # Show at most 20
+            original_rating = rating_map.get(r.review_id, "?")
+            print(
+                f"   {r.review_id:<8} {str(original_rating):<5} "
+                f"{r.sentiment:<10} {r.issue_category:<20} {r.confidence:<7.2f}"
+            )
+        if len(human_review_items) > 20:
+            print(f"   ... 还有 {len(human_review_items) - 20} 条未显示")
+        print()
+        print("   请查看以下文件了解详情：")
+        print(f"   - 报告: {output_report}")
+        print(f"   - 结果: {output_json}")
+
+        # Check error log
+        error_count = count_error_log_entries()
+        error_log_path = PROJECT_ROOT / "outputs" / "results" / "error_cases.jsonl"
+        if error_count > 0:
+            print(f"   - 错误日志: {error_log_path} ({error_count} 条记录)")
+        print("   ════════════════════════════════════════════════════")
+    else:
+        print()
+        print("   ✅ 所有评论均无需人工复核。")
+
+    print()
+
+    # ── Error log summary ─────────────────────────────────────────────
+    error_count = count_error_log_entries()
+    if error_count > 0:
+        print(f"📋 错误案例日志: outputs/results/error_cases.jsonl ({error_count} 条)")
+        print("   使用以下命令查看:")
+        print("   head -n 5 outputs/results/error_cases.jsonl")
+    else:
+        print("📋 无错误案例记录。")
+
     print("=" * 50)
 
 

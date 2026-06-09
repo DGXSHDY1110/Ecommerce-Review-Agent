@@ -16,7 +16,7 @@ from src.review_agent.workflow import (
     analyze_batch_request,
     analyze_review,
     analyze_reviews_batch,
-    _apply_guardrails,
+    apply_guardrails,
 )
 
 
@@ -85,9 +85,21 @@ class TestAnalyzeReview:
         result = analyze_review(review, client=client)
         assert result.issue_category == "logistics"
 
+    def test_guardrails_are_applied_in_pipeline(self):
+        """analyze_review should apply guardrails to the result."""
+        settings = make_mock_settings()
+        client = LLMClient(settings=settings)
+        # A low-rating review in mock mode will always have needs_human_review=True
+        # because mock confidence is 0.5 < 0.6
+        review = make_review(rating=2, review_text="Battery issue.")
+        result = analyze_review(review, client=client)
+        assert result.needs_human_review is True
+        # The guardrail should have been applied (confidence < 0.6 triggered it)
+        assert result.confidence == 0.5
+
 
 class TestGuardrails:
-    """Tests for _apply_guardrails post-hoc rules."""
+    """Tests for apply_guardrails post-hoc rules."""
 
     def test_low_confidence_flags_human_review(self):
         """Confidence < 0.6 should set needs_human_review=True."""
@@ -98,7 +110,7 @@ class TestGuardrails:
             confidence=0.5,
             needs_human_review=False,
         )
-        result = _apply_guardrails(review, analysis)
+        result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
 
     def test_contradiction_detection(self):
@@ -110,7 +122,7 @@ class TestGuardrails:
             confidence=0.9,
             needs_human_review=False,
         )
-        result = _apply_guardrails(review, analysis)
+        result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
 
     def test_other_category_low_rating_flags(self):
@@ -123,7 +135,7 @@ class TestGuardrails:
             confidence=0.9,
             needs_human_review=False,
         )
-        result = _apply_guardrails(review, analysis)
+        result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
 
     def test_valid_result_passes_guardrails(self):
@@ -133,12 +145,43 @@ class TestGuardrails:
             review_id="r001",
             sentiment="negative",
             issue_category="product_quality",
+            priority="high",
+            responsible_team="product",
+            summary_zh="产品在使用后立即损坏，质量存在严重问题。",
+            suggested_action_zh="建议产品团队检查该批次质量并联系客户退换货。",
             confidence=0.9,
             needs_human_review=False,
         )
-        result = _apply_guardrails(review, analysis)
-        # Still false because confidence >= 0.6, sentiment matches rating, category is not "other"
+        result = apply_guardrails(review, analysis)
         assert result.needs_human_review is False
+
+    def test_empty_summary_flags(self):
+        """Empty summary_zh should trigger human review."""
+        review = make_review(rating=4)
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            sentiment="positive",
+            confidence=0.9,
+            summary_zh="",
+            suggested_action_zh="Valid action.",
+            needs_human_review=False,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is True
+
+    def test_empty_action_flags(self):
+        """Empty suggested_action_zh should trigger human review."""
+        review = make_review(rating=4)
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            sentiment="positive",
+            confidence=0.9,
+            summary_zh="Valid summary.",
+            suggested_action_zh="",
+            needs_human_review=False,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is True
 
 
 class TestAnalyzeBatch:
@@ -171,3 +214,27 @@ class TestAnalyzeBatch:
         assert response.total == 2
         assert response.needs_human_review_count >= 0
         assert len(response.results) == 2
+
+    def test_batch_preserves_order(self):
+        """Results should be in the same order as input reviews."""
+        settings = make_mock_settings()
+        client = LLMClient(settings=settings)
+        reviews = [
+            make_review("r003"),
+            make_review("r001"),
+            make_review("r002"),
+        ]
+        results = analyze_reviews_batch(reviews, client=client)
+        assert [r.review_id for r in results] == ["r003", "r001", "r002"]
+
+    def test_all_mock_results_need_human_review(self):
+        """In mock mode, every result should need human review (confidence=0.5 < 0.6)."""
+        settings = make_mock_settings()
+        client = LLMClient(settings=settings)
+        reviews = [
+            make_review("r001", rating=2),
+            make_review("r002", rating=4),
+            make_review("r003", rating=5),
+        ]
+        results = analyze_reviews_batch(reviews, client=client)
+        assert all(r.needs_human_review for r in results)
