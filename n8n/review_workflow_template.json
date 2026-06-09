@@ -1,0 +1,133 @@
+{
+  "name": "Ecommerce Review Agent - Daily Classification",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-1001-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Generate 3 Mock E-Commerce Reviews ──────────────────────────\n// In production, replace with: HTTP Request to platform API,\n// database query, or file read.\n\nconst mockReviews = [\n  {\n    review_id: \"r001\",\n    platform: \"Amazon\",\n    product_name: \"Wireless Security Camera\",\n    rating: 2,\n    review_text: \"Battery drains too fast and the night vision is blurry.\",\n    country: \"US\",\n    created_at: \"2026-06-01\"\n  },\n  {\n    review_id: \"r002\",\n    platform: \"Shopify\",\n    product_name: \"Bluetooth Earbuds\",\n    rating: 1,\n    review_text: \"Left earbud stopped pairing after 3 days. Very disappointed.\",\n    country: \"DE\",\n    created_at: \"2026-06-02\"\n  },\n  {\n    review_id: \"r003\",\n    platform: \"Amazon\",\n    product_name: \"Yoga Mat\",\n    rating: 5,\n    review_text: \"Perfect thickness, non-slip, arrived on time. Love it!\",\n    country: \"JP\",\n    created_at: \"2026-06-02\"\n  }\n];\n\n// Each review becomes a separate item flowing to the HTTP Request node.\n// For batch mode (POST /api/v1/analyze_batch), wrap all in one item:\n// return [{ json: { reviews: mockReviews } }];\nreturn mockReviews.map(review => ({ json: review }));"
+      },
+      "id": "a1b2c3d4-1002-4000-8000-000000000002",
+      "name": "Generate Mock Reviews",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/api/v1/analyze",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "redirect": {
+            "redirect": {}
+          }
+        }
+      },
+      "id": "a1b2c3d4-1003-4000-8000-000000000003",
+      "name": "Call Analyze API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Aggregate Analysis Results ──────────────────────────────────\n// Input: array of items from HTTP Request node,\n// each item.json is a ReviewAnalysis object.\n\nconst results = $input.all().map(item => item.json);\n\n// ── Counts ──────────────────────────────────────────────────────\nconst totalReviews = results.length;\nconst negativeReviews = results.filter(r => r.sentiment === 'negative').length;\nconst highPriorityReviews = results.filter(r => r.priority === 'high').length;\nconst needsHumanReviewCount = results.filter(r => r.needs_human_review === true).length;\n\n// ── Category Distribution ───────────────────────────────────────\nconst categoryDistribution = {};\nresults.forEach(r => {\n  const cat = r.issue_category || 'other';\n  categoryDistribution[cat] = (categoryDistribution[cat] || 0) + 1;\n});\n\n// ── Responsible Team Distribution ───────────────────────────────\nconst teamDistribution = {};\nresults.forEach(r => {\n  const team = r.responsible_team || 'unknown';\n  teamDistribution[team] = (teamDistribution[team] || 0) + 1;\n});\n\n// ── High-Priority Items (for notification) ──────────────────────\nconst highPriorityItems = results.filter(r =>\n  r.priority === 'high' || r.needs_human_review === true\n);\n\n// ── Report Summary ──────────────────────────────────────────────\nconst reportSummary = [\n  '📊 Daily Review Analysis Report',\n  '━━━━━━━━━━━━━━━━━━━━━━━━━━━━',\n  `Total Reviews:        ${totalReviews}`,\n  `Negative Reviews:     ${negativeReviews} (${((negativeReviews / totalReviews) * 100).toFixed(1)}%)`,\n  `High Priority:        ${highPriorityReviews}`,\n  `Needs Human Review:   ${needsHumanReviewCount}`,\n  '',\n  '📂 Category Distribution:',\n  ...Object.entries(categoryDistribution).map(([k, v]) => `  - ${k}: ${v}`),\n  '',\n  '👥 Responsible Team Distribution:',\n  ...Object.entries(teamDistribution).map(([k, v]) => `  - ${k}: ${v}`),\n  '',\n  '⚠️  Items Requiring Attention:',\n  ...(highPriorityItems.length\n    ? highPriorityItems.map(r => `  - [${r.review_id}] ${r.priority} | ${r.issue_category} | ${r.summary_zh}`)\n    : ['  (none)'])\n].join('\\n');\n\n// ── Return aggregated object ────────────────────────────────────\nreturn [{\n  json: {\n    report_generated_at: new Date().toISOString(),\n    total_reviews: totalReviews,\n    negative_reviews: negativeReviews,\n    high_priority_reviews: highPriorityReviews,\n    needs_human_review_count: needsHumanReviewCount,\n    category_distribution: categoryDistribution,\n    responsible_team_distribution: teamDistribution,\n    high_priority_items: highPriorityItems,\n    report_summary: reportSummary,\n    raw_results: results\n  }\n}];"
+      },
+      "id": "a1b2c3d4-1004-4000-8000-000000000004",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-1005-4000-8000-000000000005",
+      "name": "Display Report",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Generate Mock Reviews",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Mock Reviews": {
+      "main": [
+        [
+          {
+            "node": "Call Analyze API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Analyze API": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Display Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1.0.0-template",
+  "active": false,
+  "description": "Cross-border e-commerce review monitoring and auto-classification. Generates mock reviews, calls FastAPI AI analysis, aggregates results into a daily report. Template for Milestone 4 — replace placeholder URLs with real endpoints before use. No API keys or secrets included."
+}
