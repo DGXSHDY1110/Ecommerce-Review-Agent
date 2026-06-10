@@ -1,31 +1,26 @@
-# n8n Workflow Design
+# n8n Workflow Design — Production Edition
 
 > Cross-border e-commerce review monitoring and automatic classification — n8n workflow documentation.
-> This document guides you through building, understanding, and demoing the n8n workflow that calls the FastAPI AI analysis service.
+> V2-M4: Production-grade workflow with IF routing, validate node, batch processing, Feishu notification, and error handling.
 
 ---
 
 ## 1. Workflow Goal
 
-This n8n workflow automates the **cross-border e-commerce review monitoring and classification** pipeline.
+This n8n workflow automates the **cross-border e-commerce review monitoring and classification** pipeline from data ingestion to team notification.
 
 ### Business Objectives
 
 | # | Objective | How |
 |---|-----------|-----|
-| 1 | **Auto-ingest review data** | Code Node generates mock reviews (production: read from DB / API / CSV) |
-| 2 | **Call AI analysis service** | HTTP Request node → FastAPI `POST /api/v1/analyze` |
-| 3 | **Get structured classification** | Sentiment, issue category, priority, responsible team, Chinese summary, suggested action |
-| 4 | **Aggregate into daily report** | Code Node computes statistics, distributions, and human-review flags |
-| 5 | **Notify operations team** | (Future) Feishu bot webhook, Feishu multi-dimensional table, email |
-| 6 | **Extend to real platforms** | (Future) Amazon SP-API, Shopify Admin API, customer service ticketing |
-
-### Why This Workflow Matters
-
-- **One-click execution**: From raw review data to structured report in seconds.
-- **Consistent classification**: LLM + schema validation ensures every review is classified the same way.
-- **Human-in-the-loop**: Low-confidence and contradictory results are flagged, not auto-closed.
-- **Interview-ready**: Demonstrates AI service integration, workflow orchestration, and production thinking.
+| 1 | **Read review data** | Read from CSV / API / database (production replaceable) |
+| 2 | **Split into batches** | SplitInBatches for large datasets |
+| 3 | **Call AI analysis service** | HTTP Request → FastAPI `POST /api/v1/analyze_batch` |
+| 4 | **Validate results** | Code Node validates response structure and field completeness |
+| 5 | **Route by priority/confidence** | IF nodes route high-priority / low-confidence to separate paths |
+| 6 | **Generate daily report** | Code Node computes statistics and formats a Markdown report |
+| 7 | **Notify operations team** | Feishu bot webhook (placeholder) for urgent items |
+| 8 | **Extend to real platforms** | (Future) Amazon SP-API, Shopify Admin API, Feishu Base |
 
 ---
 
@@ -33,47 +28,45 @@ This n8n workflow automates the **cross-border e-commerce review monitoring and 
 
 ### 2.1 Start the FastAPI Service
 
-The n8n workflow calls the FastAPI service. Start it **before** running the workflow:
-
 ```bash
 conda activate ecommerce-agent
 cd /root/autodl-tmp/ecommerce-review-agent
 
-# Mock mode — no API key needed (recommended for demo)
-LLM_MOCK_MODE=true uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000 --reload
+# Real mode — requires DEEPSEEK_API_KEY in .env
+uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000 --reload
+
+# Mock mode — for offline demo / testing
+USE_MOCK_LLM=true uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 2.2 Verify the Service is Running
+### 2.2 Verify the Service
 
 ```bash
 # Health check
 curl http://127.0.0.1:8000/api/v1/health
+
+# Mode check (NEW V2-M4)
+curl http://127.0.0.1:8000/api/v1/mode
 ```
 
-Expected response:
+### 2.3 Mode Endpoint Response (V2-M4)
+
+```
+GET http://127.0.0.1:8000/api/v1/mode
+```
 
 ```json
 {
-  "status": "ok",
-  "service": "ecommerce-review-agent"
+  "service": "ecommerce-review-agent",
+  "use_mock_llm": false,
+  "llm_mode": "real",
+  "model": "deepseek-v4-pro",
+  "base_url": "https://api.deepseek.com",
+  "api_key_configured": true
 }
 ```
 
-### 2.3 Test the Analyze Endpoint
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "review_id": "r001",
-    "platform": "Amazon",
-    "product_name": "Wireless Security Camera",
-    "rating": 2,
-    "review_text": "Battery drains too fast and the night vision is blurry.",
-    "country": "US",
-    "created_at": "2026-06-01"
-  }'
-```
+> **n8n integration note**: Call `/api/v1/mode` at workflow start. If `llm_mode` is `"mock"` and `api_key_configured` is `false`, the workflow should notify that results are for testing only.
 
 ### 2.4 n8n Environment Setup
 
@@ -91,405 +84,416 @@ export N8N_SECURE_COOKIE=false
 n8n start
 ```
 
-Then open `http://127.0.0.1:5678` in your browser.
-
-> **Note**: n8n accesses FastAPI at `http://127.0.0.1:8000`. Both services run on the same machine for the MVP.
-
 ---
 
-## 3. n8n Node Sequence
+## 3. Recommended Production Workflow
 
 ### 3.1 Flow Diagram (Mermaid)
 
 ```mermaid
 graph TD
-    START["1. Manual Trigger<br/>(or Schedule Trigger)"] --> GEN["2. Code Node<br/>Generate Mock Reviews"]
-    GEN --> LOOP["3. Loop Over Items<br/>(SplitInBatches / Item Lists)"]
-    LOOP --> HTTP["4. HTTP Request Node<br/>POST /api/v1/analyze"]
-    HTTP --> VALIDATE["5. Code Node<br/>Validate & Aggregate Results"]
-    VALIDATE --> OUTPUT["6. Output / NoOp Node<br/>Display Daily Report"]
-    VALIDATE -.-> FEISHU["7. (Optional) HTTP Request<br/>Feishu Bot Webhook"]
-    OUTPUT -.-> TABLE["8. (Future) Feishu<br/>Multi-dimensional Table"]
+    START["1. Schedule Trigger<br/>(Daily 9:07 AM)"] --> MODE["2. HTTP Request<br/>GET /api/v1/mode"]
+    MODE --> READ["3. Code Node<br/>Read Reviews from CSV / API"]
+    READ --> SPLIT["4. SplitInBatches<br/>(5 reviews per batch)"]
+    SPLIT --> BATCH["5. HTTP Request<br/>POST /api/v1/analyze_batch"]
+    BATCH --> VALIDATE["6. Code Node<br/>Validate & Aggregate"]
+    VALIDATE --> IF_HR{"7. IF Node<br/>needs_human_review<br/>or high priority?"}
+    IF_HR -->|Yes| ALERT["8. Code Node<br/>Build Feishu Alert Msg"]
+    IF_HR -->|No| REPORT["9. Code Node<br/>Generate Daily Report"]
+    ALERT --> FEISHU["10. HTTP Request<br/>Feishu Bot Webhook<br/>(placeholder)"]
+    REPORT --> OUTPUT["11. Output / Write File"]
+    FEISHU --> OUTPUT
+    BATCH -.-> ERRLOG["12. Error Branch<br/>Write error log"]
 ```
 
-### 3.2 Simplified Node List
+### 3.2 Production Node List (12 nodes)
 
-| Order | Node Name | Node Type | Required |
-|-------|-----------|-----------|----------|
-| 1 | Manual Trigger | `n8n-nodes-base.manualTrigger` | ✅ |
-| 2 | Generate Mock Reviews | `n8n-nodes-base.code` (JavaScript) | ✅ |
-| 3 | Loop Over Items | `n8n-nodes-base.splitInBatches` | Optional* |
-| 4 | Call Analyze API | `n8n-nodes-base.httpRequest` | ✅ |
-| 5 | Aggregate Results | `n8n-nodes-base.code` (JavaScript) | ✅ |
-| 6 | Output Report | `n8n-nodes-base.noOp` | ✅ |
-| 7 | Feishu Notification | `n8n-nodes-base.httpRequest` | Optional |
-| 8 | Feishu Table Write | `n8n-nodes-base.httpRequest` | Future |
-
-> \* **Loop note**: For the MVP with 3 mock reviews, you can send all reviews in a single batch call (`POST /api/v1/analyze_batch`) and skip the Loop node. The Loop node is useful when processing reviews one-by-one (production pattern) or when the batch size is large. This document covers both approaches.
+| # | Node Name | Node Type | Required | Phase |
+|---|-----------|-----------|----------|-------|
+| 1 | Schedule Trigger | `n8n-nodes-base.scheduleTrigger` | Production | Trigger |
+| 2 | Check Service Mode | `n8n-nodes-base.httpRequest` (GET /api/v1/mode) | ✅ | Pre-flight |
+| 3 | Read Reviews Source | `n8n-nodes-base.code` (JavaScript) | ✅ | Data |
+| 4 | Split In Batches | `n8n-nodes-base.splitInBatches` | ✅ | Batching |
+| 5 | Call Analyze Batch API | `n8n-nodes-base.httpRequest` (POST /api/v1/analyze_batch) | ✅ | AI |
+| 6 | Validate Result | `n8n-nodes-base.code` (JavaScript) | ✅ | Quality |
+| 7 | IF Human Review / High Priority | `n8n-nodes-base.if` | ✅ | Routing |
+| 8 | Build Feishu Alert Message | `n8n-nodes-base.code` (JavaScript) | ✅ | Alert |
+| 9 | Generate Daily Report | `n8n-nodes-base.code` (JavaScript) | ✅ | Report |
+| 10 | Send Feishu Bot | `n8n-nodes-base.httpRequest` (POST webhook) | Placeholder | Notify |
+| 11 | Output / Write Report | `n8n-nodes-base.code` or `n8n-nodes-base.writeFile` | ✅ | Output |
+| 12 | Error Branch | `n8n-nodes-base.code` + IF routing | ✅ | Resilience |
 
 ---
 
 ## 4. Each Node's Role
 
-### 4.1 Manual Trigger
+### 4.1 Schedule Trigger
 
 | Property | Value |
 |----------|-------|
-| **Node Type** | `n8n-nodes-base.manualTrigger` |
-| **Input** | None (user clicks "Execute Workflow") |
-| **Output** | Empty `{}` — triggers the workflow |
-| **Configuration** | Default settings; no parameters needed |
-| **Interview Point** | "This is where the workflow starts. In production, replace with a Schedule Trigger (e.g., every hour at HH:07) or a Webhook Trigger from an e-commerce platform." |
+| **Node Type** | `n8n-nodes-base.scheduleTrigger` |
+| **Cron** | `7 9 * * 1-5` (9:07 AM, Mon–Fri) |
+| **Input** | None |
+| **Output** | `{ timestamp: "..." }` |
+| **Interview Point** | "This replaces the Manual Trigger in production. It runs every weekday at 9:07 AM — the 7-minute offset avoids the :00 rush hour of cron jobs. For MVP demos, use Manual Trigger instead." |
 
----
+### 4.2 HTTP Request: Check Service Mode (GET /api/v1/mode)
 
-### 4.2 Code Node: Generate Mock Reviews
+| Property | Value |
+|----------|-------|
+| **Node Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | GET |
+| **URL** | `http://127.0.0.1:8000/api/v1/mode` |
+| **Timeout** | 10 seconds |
+| **Interview Point** | "Before processing any data, we check what mode the service is in. If it's mock mode, we tag the report accordingly. In production, this can also trigger an alert if the API key is missing or the model configuration has changed." |
+
+### 4.3 Code Node: Read Reviews Source
 
 | Property | Value |
 |----------|-------|
 | **Node Type** | `n8n-nodes-base.code` |
 | **Language** | JavaScript |
-| **Input** | Trigger output (unused) |
-| **Output** | Array of review objects matching `ReviewInput` schema |
-| **Configuration** | Mode: "Run Once for All Items" |
+| **Mode** | "Run Once for All Items" |
+| **Interview Point** | "This node abstracts data ingestion. In production, replace with HTTP Request to Amazon SP-API, database query, or CSV file read. The downstream nodes don't care where data comes from — they just expect an array of review objects matching the ReviewInput schema." |
 
-**What it does**: Generates 3 mock e-commerce reviews covering different platforms, ratings, and issue types. In production, this node would read from a database, CSV file, or platform API.
+### 4.4 Split In Batches
 
-**Interview Point**: "This node simulates data ingestion. In production, you'd replace this with an HTTP Request to Amazon SP-API or a database query. The key is that the downstream nodes don't care where the data comes from — they just expect the `ReviewInput` schema."
+| Property | Value |
+|----------|-------|
+| **Node Type** | `n8n-nodes-base.splitInBatches` |
+| **Batch Size** | 5 |
+| **Options** | Reset: false |
+| **Interview Point** | "For datasets larger than a few reviews, batching prevents timeout and gives you per-batch visibility. If one batch fails, the others still process. This is a key production pattern — you don't want 50 reviews to fail because of one problem." |
 
----
-
-### 4.3 HTTP Request Node: Call Analyze API
+### 4.5 HTTP Request: Call Analyze Batch API (POST /api/v1/analyze_batch)
 
 | Property | Value |
 |----------|-------|
 | **Node Type** | `n8n-nodes-base.httpRequest` |
 | **Method** | POST |
-| **URL** | `http://127.0.0.1:8000/api/v1/analyze` |
+| **URL** | `http://127.0.0.1:8000/api/v1/analyze_batch` |
 | **Headers** | `Content-Type: application/json` |
-| **Body** | JSON review object (from previous node) |
-| **Timeout** | 30 seconds |
+| **Body Format** | JSON |
+| **Body** | `={ "reviews": $json.reviews }` |
+| **Timeout** | 120 seconds |
 | **Retry** | 1 retry on failure |
+| **Interview Point** | "This is the core AI integration point. n8n sends a batch of reviews to FastAPI, which calls DeepSeek V4 Pro, validates with Pydantic, applies guardrails, and returns structured results. n8n never holds the DeepSeek API key — the FastAPI service handles authentication." |
 
-**What it does**: Sends each review to the FastAPI AI analysis service and receives structured classification results.
-
-**Interview Point**: "This is the bridge between workflow automation and AI intelligence. n8n handles the orchestration — timing, retries, error routing — while FastAPI + LLM handle the actual 'thinking'. This separation means you can swap the AI model or service without changing the workflow."
-
----
-
-### 4.4 Code Node: Aggregate Results
+### 4.6 Code Node: Validate Result
 
 | Property | Value |
 |----------|-------|
 | **Node Type** | `n8n-nodes-base.code` |
 | **Language** | JavaScript |
-| **Input** | Array of `ReviewAnalysis` objects from HTTP Request |
-| **Output** | Aggregated statistics and daily report object |
+| **Interview Point** | "This is the quality gate. We validate that the batch response has all required fields, that counts match, and that each result includes evidence, sentiment, and llm_mode. Failed validations route to the error branch." |
 
-**What it does**: Computes summary statistics from all analyzed reviews:
-- Total reviews processed
-- Negative review count and percentage
-- High-priority review count
-- Human review flag count
-- Issue category distribution
-- Responsible team distribution
-- Generates a human-readable report summary
+**Validation checks:**
 
-**Interview Point**: "This node demonstrates post-processing — turning raw AI outputs into actionable business intelligence. The statistics answer questions like 'Which product has the most battery complaints?' and 'How many reviews need human attention today?'"
+```javascript
+// For the batch response, check:
+// 1. results array exists and has correct length
+// 2. total == results.length
+// 3. Each result has: sentiment, issue_category, priority, evidence, llm_mode
+// 4. real_count + mock_count >= total - error_count
+// 5. If llm_mode == 'mock', flag for attention (not production data)
+```
 
----
-
-### 4.5 NoOp / Output Node: Display Report
+### 4.7 IF Node: Human Review / High Priority
 
 | Property | Value |
 |----------|-------|
-| **Node Type** | `n8n-nodes-base.noOp` |
-| **Input** | Aggregated report object |
-| **Output** | Same as input (pass-through) |
+| **Node Type** | `n8n-nodes-base.if` |
+| **Conditions** | See below |
+| **True branch** | → Build Feishu Alert Message |
+| **False branch** | → Generate Daily Report |
+| **Interview Point** | "The IF node routes results to different downstream paths. Urgent items go to the alert path for immediate notification. Routine results go to the daily report path. This is the bridge between AI analysis and business action." |
 
-**What it does**: Serves as a terminal node where you can inspect the final output in the n8n execution view.
+**Routing conditions:**
 
-**Interview Point**: "In production, this would be replaced by nodes that write to Feishu multi-dimensional tables, send email digests, or create tickets in a customer service system. The NoOp is here as a checkpoint so you can verify the workflow output during the demo."
+```
+Condition 1: $json.needs_human_review == true
+Condition 2: $json.priority == high
+Condition 3: $json.confidence < 0.6
+Condition 4: $json.issue_category == other AND $json.confidence < 0.7
+Condition 5: $json.is_mock == true  → warn: "Results are mock — not for business decisions"
+```
 
----
+### 4.8 Code Node: Build Feishu Alert Message
 
-### 4.6 (Optional) HTTP Request: Feishu Bot Notification
+| Property | Value |
+|----------|-------|
+| **Node Type** | `n8n-nodes-base.code` |
+| **Language** | JavaScript |
+| **Interview Point** | "High-priority items need immediate attention. This node formats them into a Feishu message card with review ID, issue category, Chinese summary, and suggested action. In production, this card drops into the operations team's Feishu group chat within seconds of detection." |
+
+### 4.9 Code Node: Generate Daily Report
+
+| Property | Value |
+|----------|-------|
+| **Node Type** | `n8n-nodes-base.code` |
+| **Language** | JavaScript |
+| **Interview Point** | "Standard reviews that don't need urgent attention are collected into a daily report. This mirrors what the Python `report.py` generates — but in n8n JavaScript, giving the operations team a self-contained view of the day's review landscape." |
+
+### 4.10 HTTP Request: Send Feishu Bot (Placeholder)
 
 | Property | Value |
 |----------|-------|
 | **Node Type** | `n8n-nodes-base.httpRequest` |
 | **Method** | POST |
-| **URL** | `YOUR_FEISHU_WEBHOOK_URL` (placeholder) |
+| **URL** | `YOUR_FEISHU_WEBHOOK_URL` |
 | **Headers** | `Content-Type: application/json` |
-| **Body** | Feishu message card with report summary |
+| **Body** | Formatted Feishu message card from previous node |
+| **Interview Point** | "The webhook URL is a placeholder — in production, replace with your actual Feishu bot webhook. The message card format follows Feishu's interactive message spec. If the webhook fails, the workflow doesn't crash — the report is still written locally." |
 
-**What it does**: Sends a formatted notification to a Feishu group chat with the daily report summary and urgent action items.
+### 4.11 Output / Write Report
 
-**Interview Point**: "This shows how AI analysis flows into team communication. When a high-priority negative review is detected, the operations team gets notified in Feishu within seconds — not hours."
+| Property | Value |
+|----------|-------|
+| **Node Type** | `n8n-nodes-base.code` or `n8n-nodes-base.noOp` |
+| **Interview Point** | "Terminal node. In production, replace with Feishu Base API write, database insert, or file output. The NoOp lets you inspect the final output during development." |
+
+### 4.12 Error Branch
+
+| Property | Value |
+|----------|-------|
+| **Node Type** | IF after HTTP Request → Code Node |
+| **Conditions** | `statusCode != 200` OR `$json.error_count > 0` |
+| **Interview Point** | "Errors are not ignored. The error branch logs failures, retries where appropriate, and notifies if error rate exceeds threshold. This is the difference between a demo and a production system." |
 
 ---
 
-## 5. FastAPI Call Specification
+## 5. FastAPI Endpoint Reference for n8n
 
-### 5.1 Endpoint
-
-```
-POST http://127.0.0.1:8000/api/v1/analyze
-```
-
-### 5.2 Request Headers
-
-```
-Content-Type: application/json
-```
-
-### 5.3 Request Body Example
-
-```json
-{
-  "review_id": "r001",
-  "platform": "Amazon",
-  "product_name": "Wireless Security Camera",
-  "rating": 2,
-  "review_text": "Battery drains too fast and the night vision is blurry.",
-  "country": "US",
-  "created_at": "2026-06-01"
-}
-```
-
-### 5.4 Response Body Example
-
-```json
-{
-  "review_id": "r001",
-  "sentiment": "negative",
-  "issue_category": "battery",
-  "priority": "high",
-  "responsible_team": "product",
-  "summary_zh": "用户反馈电池续航差且夜视模糊。",
-  "suggested_action_zh": "建议产品团队检查该型号电池投诉率和夜视表现。",
-  "confidence": 0.86,
-  "needs_human_review": false
-}
-```
-
-### 5.5 Batch Endpoint (Alternative)
-
-For processing multiple reviews in a single HTTP call, use:
+### 5.1 Recommended Endpoint for Batch Operations
 
 ```
 POST http://127.0.0.1:8000/api/v1/analyze_batch
 ```
 
-Request body:
+**Why batch over single**: One HTTP call processes multiple reviews, reducing n8n round-trips and giving you aggregate statistics (`total`, `real_count`, `mock_count`, `error_count`, `needs_human_review_count`) in a single response.
+
+### 5.2 Batch Request Body
 
 ```json
 {
   "reviews": [
-    { "review_id": "r001", "platform": "Amazon", "product_name": "Camera A", "rating": 2, "review_text": "Battery drains too fast.", "country": "US", "created_at": "2026-06-01" },
-    { "review_id": "r002", "platform": "Shopify", "product_name": "Camera B", "rating": 4, "review_text": "Great image quality.", "country": "DE", "created_at": "2026-06-02" }
+    {
+      "review_id": "r001",
+      "platform": "Amazon",
+      "product_name": "Wireless Security Camera",
+      "rating": 2,
+      "review_text": "Battery drains too fast and the night vision is blurry.",
+      "country": "US",
+      "created_at": "2026-06-01"
+    }
   ]
 }
 ```
 
-Response includes `total`, `needs_human_review_count`, and `results[]`.
+### 5.3 Batch Response Body (V2-M4)
 
-### 5.6 Response Field Reference
+```json
+{
+  "total": 3,
+  "needs_human_review_count": 1,
+  "error_count": 0,
+  "real_count": 3,
+  "mock_count": 0,
+  "results": [
+    {
+      "review_id": "r001",
+      "sentiment": "negative",
+      "issue_category": "battery",
+      "priority": "high",
+      "responsible_team": "product",
+      "summary_zh": "客户反馈电池耗电过快...",
+      "suggested_action_zh": "建议产品团队检查电池表现...",
+      "confidence": 0.95,
+      "needs_human_review": false,
+      "evidence": ["Battery drains too fast", "night vision is blurry"],
+      "llm_mode": "real",
+      "is_mock": false,
+      "model": "deepseek-v4-pro",
+      "processing_time_ms": 15234.5
+    }
+  ]
+}
+```
+
+### 5.4 Response Field Reference (Full V2 Schema)
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `review_id` | string | Echoed from input |
-| `sentiment` | string | `positive`, `neutral`, or `negative` |
-| `issue_category` | string | One of: `logistics`, `product_quality`, `battery`, `image_quality`, `customer_service`, `price`, `description_mismatch`, `other` |
-| `priority` | string | `high`, `medium`, or `low` |
-| `responsible_team` | string | One of: `operations`, `product`, `supply_chain`, `customer_service`, `marketing`, `unknown` |
+| `sentiment` | string | `positive`, `neutral`, or `negative` (strict enum) |
+| `issue_category` | string | One of 8 categories (strict enum) |
+| `priority` | string | `high`, `medium`, or `low` (strict enum) |
+| `responsible_team` | string | One of 6 teams (strict enum) |
 | `summary_zh` | string | Chinese summary of the review issue |
 | `suggested_action_zh` | string | Suggested action in Chinese |
 | `confidence` | float | 0.0–1.0 |
-| `needs_human_review` | bool | `true` if low confidence or contradiction detected |
+| `needs_human_review` | bool | `true` when guardrails triggered |
+| `evidence` | list[str] | Verbatim phrases from review_text (V2-M1) |
+| `llm_mode` | string | `"real"` or `"mock"` (V2-M1) |
+| `is_mock` | bool | `true` when mock mode (V2-M1) |
+| `model` | string | Model identifier (V2-M1) |
+| `processing_time_ms` | float\|null | API call duration (V2-M2) |
+
+### 5.5 Single Review Endpoint (Alternative)
+
+```
+POST http://127.0.0.1:8000/api/v1/analyze
+```
+
+Use for single-review processing or testing. Same response fields as batch results (without the batch wrapper).
+
+### 5.6 Mode Endpoint (NEW V2-M4)
+
+```
+GET http://127.0.0.1:8000/api/v1/mode
+```
+
+Returns current service configuration — whether LLM is real or mock, which model is configured, whether API key is present.
 
 ---
 
-## 6. Code Node Examples
+## 6. Validate Result Node — Detailed Specification
 
-### 6.1 Code Node 1: Generate Mock Reviews
-
-Copy this into the first n8n Code Node (JavaScript):
+The Validate node is critical for production reliability. Here's what it should check:
 
 ```javascript
-// ── Generate 3 Mock E-Commerce Reviews ──────────────────────────
-// In production, replace with: HTTP Request to platform API,
-// database query, or file read.
+// ── Validate Batch Analysis Response ────────────────────────────────
+const batch = $input.first().json;
 
-const mockReviews = [
-  {
-    review_id: "r001",
-    platform: "Amazon",
-    product_name: "Wireless Security Camera",
-    rating: 2,
-    review_text: "Battery drains too fast and the night vision is blurry.",
-    country: "US",
-    created_at: "2026-06-01"
-  },
-  {
-    review_id: "r002",
-    platform: "Shopify",
-    product_name: "Bluetooth Earbuds",
-    rating: 1,
-    review_text: "Left earbud stopped pairing after 3 days. Very disappointed.",
-    country: "DE",
-    created_at: "2026-06-02"
-  },
-  {
-    review_id: "r003",
-    platform: "Amazon",
-    product_name: "Yoga Mat",
-    rating: 5,
-    review_text: "Perfect thickness, non-slip, arrived on time. Love it!",
-    country: "JP",
-    created_at: "2026-06-02"
-  }
+const issues = [];
+
+// Check 1: results array exists
+if (!Array.isArray(batch.results)) {
+  issues.push("results is not an array");
+}
+
+// Check 2: total matches results length
+if (batch.total !== batch.results.length) {
+  issues.push(`total (${batch.total}) != results.length (${batch.results.length})`);
+}
+
+// Check 3: each result has required fields
+const requiredFields = [
+  "review_id", "sentiment", "issue_category", "priority",
+  "confidence", "needs_human_review", "evidence", "llm_mode"
 ];
+for (const [i, r] of batch.results.entries()) {
+  for (const field of requiredFields) {
+    if (!(field in r)) {
+      issues.push(`results[${i}].${field} missing`);
+    }
+  }
+}
 
-// Return as items — each item flows to the next node individually.
-// For batch mode (POST /api/v1/analyze_batch), wrap in a single item:
-// return [{ json: { reviews: mockReviews } }];
+// Check 4: llm_mode consistency with is_mock
+for (const r of batch.results) {
+  if (r.llm_mode === "mock" && r.is_mock !== true) {
+    issues.push(`${r.review_id}: llm_mode=mock but is_mock!=true`);
+  }
+  if (r.llm_mode === "real" && r.is_mock !== false) {
+    issues.push(`${r.review_id}: llm_mode=real but is_mock!=false`);
+  }
+}
 
-return mockReviews.map(review => ({ json: review }));
-```
+// Check 5: mock mode warning
+const mockResults = batch.results.filter(r => r.llm_mode === "mock");
+if (mockResults.length > 0) {
+  issues.push(`WARNING: ${mockResults.length} results are mock — not for business decisions`);
+}
 
-**Output format**: Each review becomes one n8n item, flowing to the HTTP Request node one at a time.
+// Check 6: error count check
+if (batch.error_count > 0) {
+  issues.push(`ERROR: ${batch.error_count} reviews had errors (API/parse/validation)`);
+}
 
-**Batch alternative** (use with `POST /api/v1/analyze_batch`):
-
-```javascript
-// Return all reviews as a single batch
-return [{ json: { reviews: mockReviews } }];
-```
-
-### 6.2 Code Node 2: Aggregate Results
-
-Copy this into the second n8n Code Node (JavaScript):
-
-```javascript
-// ── Aggregate Analysis Results ──────────────────────────────────
-// Input: array of items from HTTP Request node,
-// each item.json is a ReviewAnalysis object.
-
-const results = $input.all().map(item => item.json);
-
-// ── Counts ──────────────────────────────────────────────────────
-const totalReviews = results.length;
-const negativeReviews = results.filter(r => r.sentiment === 'negative').length;
-const highPriorityReviews = results.filter(r => r.priority === 'high').length;
-const needsHumanReviewCount = results.filter(r => r.needs_human_review === true).length;
-
-// ── Category Distribution ───────────────────────────────────────
-const categoryDistribution = {};
-results.forEach(r => {
-  const cat = r.issue_category || 'other';
-  categoryDistribution[cat] = (categoryDistribution[cat] || 0) + 1;
-});
-
-// ── Responsible Team Distribution ───────────────────────────────
-const teamDistribution = {};
-results.forEach(r => {
-  const team = r.responsible_team || 'unknown';
-  teamDistribution[team] = (teamDistribution[team] || 0) + 1;
-});
-
-// ── High-Priority Items (for notification) ──────────────────────
-const highPriorityItems = results.filter(r =>
-  r.priority === 'high' || r.needs_human_review === true
-);
-
-// ── Report Summary ──────────────────────────────────────────────
-const reportSummary = `
-📊 Daily Review Analysis Report
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total Reviews:        ${totalReviews}
-Negative Reviews:     ${negativeReviews} (${((negativeReviews / totalReviews) * 100).toFixed(1)}%)
-High Priority:        ${highPriorityReviews}
-Needs Human Review:   ${needsHumanReviewCount}
-
-📂 Category Distribution:
-${Object.entries(categoryDistribution)
-  .map(([k, v]) => `  - ${k}: ${v}`)
-  .join('\n')}
-
-👥 Responsible Team Distribution:
-${Object.entries(teamDistribution)
-  .map(([k, v]) => `  - ${k}: ${v}`)
-  .join('\n')}
-
-⚠️  Items Requiring Attention:
-${highPriorityItems
-  .map(r => `  - [${r.review_id}] ${r.priority} | ${r.issue_category} | ${r.summary_zh}`)
-  .join('\n') || '  (none)'}
-`.trim();
-
-// ── Return aggregated object ────────────────────────────────────
+// Output
 return [{
   json: {
-    report_generated_at: new Date().toISOString(),
-    total_reviews: totalReviews,
-    negative_reviews: negativeReviews,
-    high_priority_reviews: highPriorityReviews,
-    needs_human_review_count: needsHumanReviewCount,
-    category_distribution: categoryDistribution,
-    responsible_team_distribution: teamDistribution,
-    high_priority_items: highPriorityItems,
-    report_summary: reportSummary,
-    // Keep raw results for debugging / downstream nodes
-    raw_results: results
+    ...batch,
+    _validation: {
+      passed: issues.length === 0 || issues.every(i => i.startsWith("WARNING")),
+      issue_count: issues.length,
+      issues: issues
+    }
   }
 }];
 ```
 
-**Output**: A single item containing the full aggregated report. This item flows to the NoOp node (or Feishu notification node) for display.
+---
 
-### 6.3 (Optional) Code Node 3: Format Feishu Message
+## 7. IF Node Logic — Detailed Conditions
 
-If using the Feishu webhook node, add this Code Node **before** the Feishu HTTP Request:
+### 7.1 Human Review Routing
+
+| Condition | Expression | Route To |
+|-----------|-----------|----------|
+| Needs human review | `$json.needs_human_review == true` | Feishu Alert |
+| High priority | `$json.priority == "high"` | Feishu Alert |
+| Very low confidence | `$json.confidence < 0.6` | Feishu Alert |
+| Uncategorized low rating | `$json.issue_category == "other" && $json.confidence < 0.7` | Feishu Alert |
+| None of the above | — | Daily Report |
+
+### 7.2 Error Routing
+
+| Condition | Expression | Action |
+|-----------|-----------|--------|
+| HTTP status ≠ 200 | `$json.statusCode != 200` | Error branch → log → retry or skip |
+| Validation failed | `$json._validation?.passed == false` | Error branch → log → inspect |
+| Batch has errors | `$json.error_count > 0` | Warn but continue (some results may be valid) |
+
+---
+
+## 8. Feishu Message Template
+
+**Placeholder URL**: `YOUR_FEISHU_WEBHOOK_URL` (replace with actual webhook in production)
+
+### Interactive Card Format
 
 ```javascript
-// ── Format Feishu Bot Message Card ──────────────────────────────
-const report = $input.first().json;
+// ── Build Feishu Alert Message Card ──────────────────────────────────
+const item = $input.first().json;
 
-const highPriorityAlerts = report.high_priority_items
-  .map(r => `【${r.priority.toUpperCase()}】${r.summary_zh} → ${r.suggested_action_zh}`)
-  .join('\n') || '(无)';
-
-const feishuMessage = {
+const card = {
   msg_type: "interactive",
   card: {
     header: {
-      title: { content: "📊 每日评论分析报告", tag: "plain_text" }
+      title: { content: "⚠️ 评论分析需人工关注", tag: "plain_text" },
+      template: "red"
     },
     elements: [
       {
         tag: "div",
         text: {
-          content: `总评论数：**${report.total_reviews}**\n负面评论：**${report.negative_reviews}**\n高优先级：**${report.high_priority_reviews}**\n需人工复核：**${report.needs_human_review_count}**`,
-          tag: "lark_md"
+          tag: "lark_md",
+          content: [
+            `**Review ID**: ${item.review_id}`,
+            `**平台**: ${item.platform || "?"}`,
+            `**产品**: ${item.product_name || "?"}`,
+            `**评分**: ${item.rating || "?"} 星`,
+            `**情绪**: ${item.sentiment}`,
+            `**问题类别**: ${item.issue_category}`,
+            `**优先级**: ${item.priority}`,
+            `**置信度**: ${(item.confidence * 100).toFixed(0)}%`,
+            `**责任团队**: ${item.responsible_team}`,
+            ``,
+            `**摘要**: ${item.summary_zh}`,
+            `**建议动作**: ${item.suggested_action_zh}`,
+            `**证据**: ${(item.evidence || []).join("; ") || "(无)"}`
+          ].join("\\n")
         }
       },
-      {
-        tag: "hr"
-      },
-      {
-        tag: "div",
-        text: {
-          content: `⚠️ 需关注事项：\n${highPriorityAlerts}`,
-          tag: "lark_md"
-        }
-      },
+      { tag: "hr" },
       {
         tag: "note",
         elements: [
           {
-            content: `生成时间：${report.report_generated_at}`,
-            tag: "plain_text"
+            tag: "plain_text",
+            content: `模式: ${item.llm_mode} | 模型: ${item.model} | ${new Date().toISOString()}`
           }
         ]
       }
@@ -497,190 +501,157 @@ const feishuMessage = {
   }
 };
 
-return [{ json: feishuMessage }];
+return [{ json: card }];
 ```
+
+> **Security note**: This template uses placeholder URL `YOUR_FEISHU_WEBHOOK_URL`. Replace with your actual Feishu bot webhook in production. Never commit real webhook URLs to Git.
 
 ---
 
-## 7. Error Handling Strategy
+## 9. Error Handling Strategy
 
-A production n8n workflow must not fail silently. Here is the error handling strategy for each failure mode:
+### 9.1 Failure Mode Matrix
 
-### 7.1 FastAPI Service Not Started
+| # | Failure | Symptom | n8n Action |
+|---|---------|---------|------------|
+| 1 | FastAPI not started | ECONNREFUSED | Check mode node fails → alert → stop |
+| 2 | HTTP timeout | Request > 120s | Retry once → if still fails, log to error branch |
+| 3 | API 422 (bad input) | statusCode=422 | Log bad input → skip → continue |
+| 4 | API 500 (server error) | statusCode=500 | Retry once → fallback → log |
+| 5 | DeepSeek API failure | error_count > 0 in response | Log → fallback results used → continue |
+| 6 | JSON parse failure | _validation issues | Retry within FastAPI → if still fails, fallback |
+| 7 | Split batch partial failure | Some batches fail | Error branch per batch → successful batches continue |
+| 8 | Feishu webhook down | Non-200 from webhook | Skip notification → report still written locally |
+| 9 | Duplicate execution | Same review_id twice | review_id dedup in report aggregation |
+| 10 | Mock mode results | is_mock=true in response | WARNING tag in report → do NOT use for business decisions |
 
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | HTTP Request node returns `ECONNREFUSED` or timeout |
-| **n8n Behavior** | HTTP Request node fails; workflow stops |
-| **Fix** | Start FastAPI first: `LLM_MOCK_MODE=true uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000` |
-| **Production** | Add a health-check node at workflow start; if health fails, send alert and skip downstream |
-
-### 7.2 HTTP Request Timeout
-
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | LLM call takes > 30 seconds |
-| **n8n Behavior** | HTTP Request node has configurable timeout (default 30s) |
-| **Config** | Set timeout to 60s in HTTP Request node options; enable "Retry on Fail" (1 retry) |
-| **Production** | Use exponential backoff (n8n's built-in "Retry on Fail" with wait); if still fails, log to error queue |
-
-### 7.3 API Returns 422 (Validation Error)
-
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | Request body doesn't match `ReviewInput` schema |
-| **n8n Behavior** | HTTP Request node returns 422 |
-| **Handling** | Add an IF node after HTTP Request: check `$json["statusCode"] !== 200` → route to error branch |
-| **Error branch** | Code Node logs the bad input to a file/DB; continues processing other reviews |
-| **Prevention** | Code Node 1 should validate data shape before sending |
-
-### 7.4 API Returns 500 (Internal Server Error)
-
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | FastAPI internal error (LLM failure, parsing error, etc.) |
-| **n8n Behavior** | HTTP Request node returns 500 |
-| **Handling** | Retry once; if still 500, log the review_id to an error list and skip |
-| **Production** | The FastAPI service already has a global exception handler and safe fallback. If 500 persists, escalate to on-call. |
-
-### 7.5 Low Confidence Result
-
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | `confidence < 0.6` |
-| **FastAPI Behavior** | Automatically sets `needs_human_review: true` (guardrail rule #1) |
-| **n8n Behavior** | Aggregate node counts these; Feishu message highlights them |
-| **Production** | Route `needs_human_review: true` items to a human review queue (e.g., Feishu multi-dimensional table with "待复核" status) |
-
-### 7.6 needs_human_review = true
-
-| Aspect | Handling |
-|--------|----------|
-| **Meaning** | Low confidence, contradiction detected, or analysis exception |
-| **n8n Behavior** | Aggregated separately in report; shown in "⚠️ Items Requiring Attention" section |
-| **Production** | Create ticket in customer service system; assign to duty manager |
-
-### 7.7 Feishu Bot Webhook Failure
-
-| Aspect | Handling |
-|--------|----------|
-| **Symptom** | Webhook URL unreachable or returns non-200 |
-| **n8n Behavior** | HTTP Request node fails |
-| **Handling** | Add an "Error Trigger" or "IF" node: if Feishu fails, write report to local file as fallback |
-| **Production** | Queue messages; retry with backoff; alert if webhook is down for > 5 minutes |
-
-### 7.8 Duplicate Execution (Idempotency)
-
-| Aspect | Handling |
-|--------|----------|
-| **Problem** | Accidentally clicking "Execute Workflow" twice processes the same reviews twice |
-| **MVP Mitigation** | Use `review_id` as dedup key in aggregation; the report shows per-review_id results — duplicates are visible |
-| **Production** | Before sending to Feishu/DB, check if `review_id` was already processed today; skip if yes |
-
-### 7.9 Error Routing Diagram
+### 9.2 Error Routing Diagram
 
 ```mermaid
 graph TD
-    HTTP["HTTP Request POST /analyze"] --> CHECK{"Status Code?"}
-    CHECK -->|200| OK["Continue to Aggregate"]
-    CHECK -->|422| LOG422["Log: Bad Input → Skip"]
+    BATCH["HTTP Request POST /analyze_batch"] --> CHECK{"statusCode?"}
+    CHECK -->|200| VAL["Validate Result"]
+    CHECK -->|422| SKIP["Log → Skip bad batch<br/>Continue with next"]
     CHECK -->|500| RETRY["Retry Once"]
     CHECK -->|Timeout| RETRY
-    RETRY -->|200| OK
-    RETRY -->|Fail| FALLBACK["Log Error → Use Fallback → Continue"]
-    OK --> AGG["Aggregate Results"]
-    AGG --> HR{"needs_human_review?"}
-    HR -->|Yes| QUEUE["Human Review Queue"]
-    HR -->|No| REPORT["Daily Report"]
+    RETRY -->|200| VAL
+    RETRY -->|Fail| FB["Use fallback → Log → Continue"]
+    VAL --> VCHECK{"Validation OK?"}
+    VCHECK -->|Yes| IF["IF Priority / HR"]
+    VCHECK -->|No| LOG["Log issues → Continue<br/>(unless critical)"]
+    IF -->|HR/High| ALERT["Feishu Alert"]
+    IF -->|OK| REPORT["Daily Report"]
+    ALERT --> OUT["Output"]
+    REPORT --> OUT
 ```
 
-### 7.10 Production Principles
+### 9.3 Production Error Handling Principles
 
-1. **Never fail silently**: Every error path produces a log entry or notification.
-2. **Retry with backoff**: Transient failures (network, timeout) are retried; permanent failures (422) are not.
-3. **Human-in-the-loop**: Uncertain results are flagged, not auto-resolved.
-4. **Idempotency**: Duplicate processing is detected and doesn't create duplicate notifications.
-5. **Graceful degradation**: If Feishu is down, the report is still saved locally.
-6. **Observability**: Error counts, retry counts, and processing latency are tracked.
-
----
-
-## 8. Interview Talking Points (2-Minute Script)
-
-> Use this script to explain the n8n workflow in an interview.
+1. **Never fail silently**: Every error path produces a log or notification.
+2. **Retry with backoff**: Transient failures (network, timeout, 5xx) are retried once. Permanent failures (4xx) are not.
+3. **Batch isolation**: One failing batch does not kill the entire run.
+4. **Mock-mode awareness**: Results produced in mock mode are clearly marked and should not be used for business decisions.
+5. **API key safety**: n8n never holds the DeepSeek API key. The FastAPI service handles authentication internally.
+6. **Graceful degradation**: If Feishu is down, the report is still saved locally.
 
 ---
 
-"这个 n8n 工作流展示了**如何把 AI 分析能力接入业务自动化流程**。"
+## 10. idempotency Strategy
 
-"整个架构分三层：**n8n 负责编排**——什么时候触发、数据怎么流转、异常怎么处理；**FastAPI 是 AI 分析服务**——接收评论数据、调用 DeepSeek LLM、返回结构化分类结果；**LLM 在 HTTP Request 节点背后发挥智能判断**——它理解评论内容、判断情绪、分类问题、生成中文摘要和建议动作。"
+### 10.1 review_id Deduplication
 
-"为什么第一版用**固定 Workflow 而不是完全自主 Agent**？因为评论分类是一个**标准化、可重复、高频率**的任务。Workflow 的输出是可预期的、可审计的、可监控的。Agent 更灵活，但适合不确定性更高的场景——比如多步推理、工具调用。在评论分类这个场景，Workflow + LLM 的组合在成本、稳定性、可控性之间达到了最好的平衡。"
+n8n Code Node should track processed `review_id`s within a single run:
 
-"为什么选 **n8n**？三个原因：第一，自托管，数据不出公司内网；第二，Code Node 允许写 JavaScript，灵活性远超无代码平台；第三，原生支持 HTTP Request、Webhook、定时触发，跟 FastAPI、飞书的集成非常自然。"
+```javascript
+// Within the Run Once for All Items context:
+const seen = new Set();
+const dedupedResults = allResults.filter(r => {
+  if (seen.has(r.review_id)) return false;
+  seen.add(r.review_id);
+  return true;
+});
+```
 
-"**如何扩展到飞书多维表格和业务系统**？在 n8n 里加一个 HTTP Request 节点调用飞书 Base API，把分类结果写入表格——review_id、问题分类、优先级、责任人、复核状态一目了然。后续再加一个飞书机器人节点，高优先级评论自动推送到运营群。"
+### 10.2 Production idempotency
 
-"**如何保证输出稳定和可人工复核**？三层保障：第一，LLM 的 Prompt 严格要求 JSON 输出 + Few-shot 示例；第二，Pydantic Schema 验证——字段对不上就重试，重试失败就用安全兜底；第三，低置信度、矛盾结果自动标记 `needs_human_review: true`——人不复核，这条评论不会自动关闭。"
-
-"这就是一个**从业务问题出发，用 AI + 工程化手段落地**的完整闭环。"
+- Store processed `review_id`s in a database or Feishu Base with a `processed_at` timestamp.
+- Before calling FastAPI, check if `review_id` was already analyzed today.
+- Schedule Trigger with Cron should use a time window (e.g., "last 24 hours") to avoid re-processing.
 
 ---
 
-## 9. Future Extensions
+## 11. Interview Talking Points — 2-Minute Script (中文)
 
-### Phase 1: Notification & Collaboration (Next)
+> Use this script to explain the production n8n workflow in an interview.
 
-| Extension | Description | n8n Nodes |
-|-----------|-------------|-----------|
-| Feishu Bot Webhook | Send daily report + urgent alerts to group chat | HTTP Request → Feishu webhook URL |
-| Feishu Multi-dimensional Table | Write classified reviews to Feishu Base for team collaboration | HTTP Request → Feishu Base API |
-| Human Review Status Flow | Track review status: 待复核 → 已确认 → 已处理 → 已关闭 | Feishu Table + Webhook callback |
+---
+
+"这个 n8n 工作流展示了**如何把 AI 分析能力以生产级标准接入业务自动化流程**。"
+
+"整个流程分四个阶段：**第一，预检**——通过 GET /api/v1/mode 检查 FastAPI 服务状态，确认是真实 DeepSeek 模式还是 Mock 模式，确认 API key 是否配置。如果服务不可用，工作流在这里就停下来并告警，不让后续节点空跑。"
+
+"**第二，批量处理**——不是一条一条发 HTTP 请求，而是用 SplitInBatches 把数据分批，每批 5 条，一次性发给 POST /api/v1/analyze_batch。这样做的好处是减少 n8n 和 FastAPI 之间的往返次数，同时保持单批粒度——一批失败不影响其他批。"
+
+"**第三，质量校验和路由**——每批返回后用一个 Code Node 做校验：results 数组长度对不对？required fields 全不全？llm_mode 和 is_mock 是否一致？校验通过后，用 IF 节点路由：高优先级和人工复核的评论走飞书告警路径，常规评论走日报报告路径。Mock 模式的结果会特别标注——不进入正式业务决策。"
+
+"**第四，通知和输出**——飞书告警消息是一个交互式卡片，包含 review_id、问题类别、中文摘要、建议动作、证据片段，运营团队在群里直接看到需要关注的内容。日报报告汇总整体数据：总评论数、各类别分布、团队工作量分布。"
+
+"**为什么用 n8n 而不是自己写 Python 脚本编排**？两个原因：第一，n8n 天然支持错误路由——IF 节点可以基于 statusCode、confidence、needs_human_review 等字段动态分支，写 Python 脚本要做很多 try/except 和 if/else；第二，n8n 的 Schedule Trigger、SplitInBatches、HTTP Request 重试是内置的——不用自己实现 cron、batching、retry。**编排用 n8n，AI 智能在 FastAPI 里，分工明确。**"
+
+"**关键安全设计**：n8n 不持有 DeepSeek API key。工作流只调 FastAPI 的 /analyze_batch 接口，API key 在 FastAPI 服务的 .env 里管理。飞书 webhook URL 也是占位符——实际部署时通过环境变量注入。n8n workflow JSON export 不包含任何 secret。"
+
+---
+
+## 12. Future Extensions
+
+### Phase 1: Notification & Collaboration
+
+| Extension | n8n Nodes | Description |
+|-----------|-----------|-------------|
+| Feishu Bot Webhook | HTTP Request | Send daily report + urgent alerts |
+| Feishu Multi-dimensional Table | HTTP Request → Feishu Base API | Write classified reviews for team collaboration |
+| Human Review Status Flow | Webhook + Code | Track: 待复核 → 已确认 → 已处理 → 已关闭 |
 
 ### Phase 2: Real Platform Integration
 
-| Extension | Description | n8n Nodes |
-|-----------|-------------|-----------|
-| Amazon SP-API | Fetch real reviews from Amazon Seller Central | HTTP Request (OAuth) → Amazon SP-API |
-| Shopify Admin API | Fetch real reviews from Shopify store | HTTP Request → Shopify GraphQL |
-| Multi-platform Aggregation | Combine reviews from Amazon + Shopify + AliExpress | Merge node → Batch analyze |
+| Extension | n8n Nodes | Description |
+|-----------|-----------|-------------|
+| Amazon SP-API | HTTP Request (OAuth) | Fetch real reviews from Seller Central |
+| Shopify Admin API | HTTP Request → GraphQL | Fetch real reviews from Shopify store |
+| Multi-platform Merge | Merge node | Combine Amazon + Shopify + AliExpress |
 
 ### Phase 3: Intelligence Upgrade
 
-| Extension | Description | n8n Nodes |
-|-----------|-------------|-----------|
-| RAG Knowledge Base | Match reviews against customer service SOP for suggested actions | HTTP Request → RAG service |
-| Scheduled Daily Report | Auto-run at 9:07 AM daily | Schedule Trigger (Cron) |
-| Trend Detection | Compare today's report with yesterday's; alert on spikes | Code Node (diff logic) |
+| Extension | n8n Nodes | Description |
+|-----------|-----------|-------------|
+| RAG Knowledge Base | HTTP Request → RAG service | Match SOP for suggested actions |
+| Trend Detection | Code Node | Compare today vs yesterday; alert on spikes |
+| Auto-reply (Low Risk) | Code + HTTP | Auto-reply thank-you for high-confidence positive reviews |
 
 ### Phase 4: Operations Dashboard
 
 | Extension | Description |
 |-----------|-------------|
-| Data Dashboard | Grafana / Metabase dashboard showing review trends, category distribution, team workload |
-| SLA Monitoring | Alert if high-priority review is not reviewed within 2 hours |
-| Auto-reply (Low Risk) | For simple, high-confidence positive reviews, auto-reply with thank-you template |
+| Data Dashboard | Grafana / Metabase: review trends, category distribution, team workload |
+| SLA Monitoring | Alert if high-priority review unreviewed after 2 hours |
+| Cost Tracking | Track DeepSeek API token usage and cost per review |
 
 ---
 
-## Appendix: Importing the Workflow Template
+## Appendix A: Workflow Template
 
-A best-effort workflow JSON template is provided at:
+A best-effort workflow JSON template is at `n8n/review_workflow_template.json`. This template includes ~12 nodes covering the production flow.
 
-```
-n8n/review_workflow_template.json
-```
+**Import instructions**:
+1. Open n8n → "Import from File" → select `n8n/review_workflow_template.json`
+2. **If import fails** due to n8n version mismatch, build the workflow manually following the node sequence in Section 3 of this document
+3. Replace `YOUR_FEISHU_WEBHOOK_URL` with your actual webhook before execution
+4. The template is a **reference architecture** — not a one-click production deployment
 
-**To import**:
+**Compatibility note**: n8n JSON templates are version-sensitive. Node `typeVersion`, parameter structure, and `position` format may differ between n8n versions. This template targets n8n v1.x format. For n8n v2.x, some fields may need adjustment. The authoritative specification is this document, not the JSON export.
 
-1. Open n8n (`http://127.0.0.1:5678`)
-2. Click "Import from File" (or drag-and-drop the JSON file)
-3. If import fails due to version mismatch, create the workflow manually following the node sequence in Section 3 of this document.
-
-**Template compatibility note**: The JSON template targets n8n v1.x format. If you're using a different version, some node parameters may differ. The template is a **reference** — the authoritative specification is this document.
-
-**No secrets in the template**: All URLs, API keys, and webhook tokens use placeholder values (e.g., `YOUR_FEISHU_WEBHOOK_URL`). Replace these with your actual values before execution.
+**No secrets**: All URLs, API keys, webhook tokens use placeholders. No real credentials are included.
 
 ---
 
-*(End of n8n workflow design document.)*
+*(End of n8n workflow design document — V2-M4 Production Edition)*

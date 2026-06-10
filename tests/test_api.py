@@ -75,6 +75,60 @@ class TestHealthEndpoint:
         assert set(data.keys()) == {"status", "service"}
 
 
+# ── Mode endpoint (V2-M4) ────────────────────────────────────────────────────
+
+class TestModeEndpoint:
+    """Tests for GET /api/v1/mode."""
+
+    def test_mode_returns_200(self, client):
+        """GET /api/v1/mode returns HTTP 200."""
+        response = client.get("/api/v1/mode")
+        assert response.status_code == 200
+
+    def test_mode_returns_service_name(self, client):
+        """Mode response includes service name."""
+        data = client.get("/api/v1/mode").json()
+        assert data["service"] == "ecommerce-review-agent"
+
+    def test_mode_includes_llm_mode(self, client):
+        """Mode response includes llm_mode (real or mock)."""
+        data = client.get("/api/v1/mode").json()
+        assert data["llm_mode"] in ("real", "mock")
+
+    def test_mode_includes_model(self, client):
+        """Mode response includes model name."""
+        data = client.get("/api/v1/mode").json()
+        assert "model" in data
+        assert isinstance(data["model"], str)
+        assert len(data["model"]) > 0
+
+    def test_mode_includes_base_url(self, client):
+        """Mode response includes base_url."""
+        data = client.get("/api/v1/mode").json()
+        assert "base_url" in data
+        assert data["base_url"].startswith("https://")
+
+    def test_mode_api_key_configured_is_bool(self, client):
+        """api_key_configured must be a boolean."""
+        data = client.get("/api/v1/mode").json()
+        assert isinstance(data["api_key_configured"], bool)
+
+    def test_mode_does_not_leak_api_key(self, client):
+        """Mode response must NOT contain the actual API key."""
+        import json as _json
+        data = client.get("/api/v1/mode").json()
+        text = _json.dumps(data).lower()
+        assert "sk-" not in text
+        assert "bearer" not in text
+        assert "deepseek_api_key" not in text
+
+    def test_mode_has_all_required_fields(self, client):
+        """Mode response must have exactly the expected fields."""
+        data = client.get("/api/v1/mode").json()
+        expected = {"service", "use_mock_llm", "llm_mode", "model", "base_url", "api_key_configured"}
+        assert set(data.keys()) == expected
+
+
 # ── Single analyze endpoint ────────────────────────────────────────────────────
 
 class TestAnalyzeEndpoint:

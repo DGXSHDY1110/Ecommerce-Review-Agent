@@ -1,124 +1,229 @@
 {
-  "name": "Ecommerce Review Agent - Daily Classification",
+  "name": "Ecommerce Review Agent - Production Daily Classification (V2-M4)",
   "nodes": [
     {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "7 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "n1-schedule-trigger",
+      "name": "Schedule Trigger (9:07 AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "notes": "Production: runs daily at 9:07 AM Mon-Fri. For demo, disable and use Manual Trigger instead."
+    },
+    {
       "parameters": {},
-      "id": "a1b2c3d4-1001-4000-8000-000000000001",
-      "name": "Manual Trigger",
+      "id": "n2-manual-trigger",
+      "name": "Manual Trigger (Demo)",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
-      "position": [250, 300]
+      "position": [250, 500],
+      "notes": "Use this for demo/testing. Disable Schedule Trigger above when using this."
     },
     {
       "parameters": {
-        "jsCode": "// ── Generate 3 Mock E-Commerce Reviews ──────────────────────────\n// In production, replace with: HTTP Request to platform API,\n// database query, or file read.\n\nconst mockReviews = [\n  {\n    review_id: \"r001\",\n    platform: \"Amazon\",\n    product_name: \"Wireless Security Camera\",\n    rating: 2,\n    review_text: \"Battery drains too fast and the night vision is blurry.\",\n    country: \"US\",\n    created_at: \"2026-06-01\"\n  },\n  {\n    review_id: \"r002\",\n    platform: \"Shopify\",\n    product_name: \"Bluetooth Earbuds\",\n    rating: 1,\n    review_text: \"Left earbud stopped pairing after 3 days. Very disappointed.\",\n    country: \"DE\",\n    created_at: \"2026-06-02\"\n  },\n  {\n    review_id: \"r003\",\n    platform: \"Amazon\",\n    product_name: \"Yoga Mat\",\n    rating: 5,\n    review_text: \"Perfect thickness, non-slip, arrived on time. Love it!\",\n    country: \"JP\",\n    created_at: \"2026-06-02\"\n  }\n];\n\n// Each review becomes a separate item flowing to the HTTP Request node.\n// For batch mode (POST /api/v1/analyze_batch), wrap all in one item:\n// return [{ json: { reviews: mockReviews } }];\nreturn mockReviews.map(review => ({ json: review }));"
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/api/v1/mode",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": { "responseFormat": "json" }
+          }
+        }
       },
-      "id": "a1b2c3d4-1002-4000-8000-000000000002",
-      "name": "Generate Mock Reviews",
+      "id": "n3-check-mode",
+      "name": "Check Service Mode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 300],
+      "notes": "Pre-flight: verify service is running and check real/mock mode. If llm_mode='mock', tag results accordingly."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Read Reviews Source ─────────────────────────────────────────\n// Production: replace with HTTP Request to Amazon SP-API / Shopify API,\n// database query, or read from CSV file via Read/Write File node.\n\nconst reviews = [\n  {\n    review_id: \"r001\",\n    platform: \"Amazon\",\n    product_name: \"Wireless Security Camera\",\n    rating: 2,\n    review_text: \"Battery drains too fast and the night vision is blurry.\",\n    country: \"US\",\n    created_at: \"2026-06-01\"\n  },\n  {\n    review_id: \"r002\",\n    platform: \"Shopify\",\n    product_name: \"Solar Battery Camera\",\n    rating: 1,\n    review_text: \"The solar panel doesn't charge the battery at all. Dead after 3 sunny days.\",\n    country: \"DE\",\n    created_at: \"2026-06-01\"\n  },\n  {\n    review_id: \"r003\",\n    platform: \"Amazon\",\n    product_name: \"Smart Doorbell Camera\",\n    rating: 5,\n    review_text: \"Super easy to install, excellent video quality even at night. Best doorbell camera!\",\n    country: \"US\",\n    created_at: \"2026-06-02\"\n  },\n  {\n    review_id: \"r004\",\n    platform: \"Amazon\",\n    product_name: \"Indoor Pet Camera\",\n    rating: 3,\n    review_text: \"The two-way audio has a 2-second delay which confuses my dog. Otherwise decent.\",\n    country: \"JP\",\n    created_at: \"2026-06-02\"\n  },\n  {\n    review_id: \"r005\",\n    platform: \"Shopify\",\n    product_name: \"WiFi Camera System\",\n    rating: 2,\n    review_text: \"NVR keeps disconnecting from WiFi every few hours. Tried factory reset, no luck.\",\n    country: \"UK\",\n    created_at: \"2026-06-02\"\n  },\n  {\n    review_id: \"r006\",\n    platform: \"Amazon\",\n    product_name: \"Baby Monitor Camera\",\n    rating: 1,\n    review_text: \"Camera stopped working after 3 weeks. Power adapter gets extremely hot.\",\n    country: \"US\",\n    created_at: \"2026-06-03\"\n  }\n];\n\n// For batch mode: wrap all reviews in a single item\nreturn [{ json: { reviews: reviews } }];"
+      },
+      "id": "n4-read-reviews",
+      "name": "Read Reviews Source",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [500, 300]
+      "position": [750, 300],
+      "notes": "Generates 6 sample reviews for demo. Production: replace with API call or file read."
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "id": "n5-split-batches",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1000, 300],
+      "notes": "Split reviews into batches of 5. Each batch processes independently — one failing batch doesn't kill the run."
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://127.0.0.1:8000/api/v1/analyze",
+        "url": "http://127.0.0.1:8000/api/v1/analyze_batch",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": []
-        },
         "specifyBody": "json",
         "jsonBody": "={{ $json }}",
         "options": {
-          "timeout": 60000,
-          "response": {
-            "response": {
-              "responseFormat": "json"
-            }
-          },
-          "redirect": {
-            "redirect": {}
-          }
+          "timeout": 120000,
+          "response": { "response": { "responseFormat": "json" } },
+          "redirect": {}
         }
       },
-      "id": "a1b2c3d4-1003-4000-8000-000000000003",
-      "name": "Call Analyze API",
+      "id": "n6-analyze-batch",
+      "name": "Call Analyze Batch API",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [750, 300]
+      "position": [1250, 300],
+      "notes": "POST /api/v1/analyze_batch — sends batch of reviews to FastAPI for DeepSeek analysis. Timeout: 120s."
     },
     {
       "parameters": {
-        "jsCode": "// ── Aggregate Analysis Results ──────────────────────────────────\n// Input: array of items from HTTP Request node,\n// each item.json is a ReviewAnalysis object.\n\nconst results = $input.all().map(item => item.json);\n\n// ── Counts ──────────────────────────────────────────────────────\nconst totalReviews = results.length;\nconst negativeReviews = results.filter(r => r.sentiment === 'negative').length;\nconst highPriorityReviews = results.filter(r => r.priority === 'high').length;\nconst needsHumanReviewCount = results.filter(r => r.needs_human_review === true).length;\n\n// ── Category Distribution ───────────────────────────────────────\nconst categoryDistribution = {};\nresults.forEach(r => {\n  const cat = r.issue_category || 'other';\n  categoryDistribution[cat] = (categoryDistribution[cat] || 0) + 1;\n});\n\n// ── Responsible Team Distribution ───────────────────────────────\nconst teamDistribution = {};\nresults.forEach(r => {\n  const team = r.responsible_team || 'unknown';\n  teamDistribution[team] = (teamDistribution[team] || 0) + 1;\n});\n\n// ── High-Priority Items (for notification) ──────────────────────\nconst highPriorityItems = results.filter(r =>\n  r.priority === 'high' || r.needs_human_review === true\n);\n\n// ── Report Summary ──────────────────────────────────────────────\nconst reportSummary = [\n  '📊 Daily Review Analysis Report',\n  '━━━━━━━━━━━━━━━━━━━━━━━━━━━━',\n  `Total Reviews:        ${totalReviews}`,\n  `Negative Reviews:     ${negativeReviews} (${((negativeReviews / totalReviews) * 100).toFixed(1)}%)`,\n  `High Priority:        ${highPriorityReviews}`,\n  `Needs Human Review:   ${needsHumanReviewCount}`,\n  '',\n  '📂 Category Distribution:',\n  ...Object.entries(categoryDistribution).map(([k, v]) => `  - ${k}: ${v}`),\n  '',\n  '👥 Responsible Team Distribution:',\n  ...Object.entries(teamDistribution).map(([k, v]) => `  - ${k}: ${v}`),\n  '',\n  '⚠️  Items Requiring Attention:',\n  ...(highPriorityItems.length\n    ? highPriorityItems.map(r => `  - [${r.review_id}] ${r.priority} | ${r.issue_category} | ${r.summary_zh}`)\n    : ['  (none)'])\n].join('\\n');\n\n// ── Return aggregated object ────────────────────────────────────\nreturn [{\n  json: {\n    report_generated_at: new Date().toISOString(),\n    total_reviews: totalReviews,\n    negative_reviews: negativeReviews,\n    high_priority_reviews: highPriorityReviews,\n    needs_human_review_count: needsHumanReviewCount,\n    category_distribution: categoryDistribution,\n    responsible_team_distribution: teamDistribution,\n    high_priority_items: highPriorityItems,\n    report_summary: reportSummary,\n    raw_results: results\n  }\n}];"
+        "jsCode": "// ── Validate Batch Analysis Response ────────────────────────────\nconst batch = $input.first().json;\nconst issues = [];\n\n// Check 1: results array exists\nif (!Array.isArray(batch.results)) {\n  issues.push(\"results is not an array\");\n}\n\n// Check 2: total matches\nif (batch.total !== (batch.results || []).length) {\n  issues.push(`total (${batch.total}) != results.length (${(batch.results || []).length})`);\n}\n\n// Check 3: each result has required fields\nconst required = [\"review_id\", \"sentiment\", \"issue_category\", \"priority\",\n                   \"confidence\", \"needs_human_review\", \"evidence\", \"llm_mode\"];\nfor (const [i, r] of (batch.results || []).entries()) {\n  for (const f of required) {\n    if (!(f in r)) issues.push(`results[${i}].${f} missing`);\n  }\n}\n\n// Check 4: mock mode warning\nconst mockCount = (batch.results || []).filter(r => r.llm_mode === \"mock\").length;\nif (mockCount > 0) {\n  issues.push(`WARNING: ${mockCount} results are mock — not for business decisions`);\n}\n\n// Check 5: error count\nif (batch.error_count > 0) {\n  issues.push(`ERROR: ${batch.error_count} reviews had errors`);\n}\n\n// Check 6: is_mock/llm_mode consistency\nfor (const r of (batch.results || [])) {\n  if (r.llm_mode === \"mock\" && r.is_mock !== true) {\n    issues.push(`${r.review_id}: llm_mode=mock but is_mock!=true`);\n  }\n  if (r.llm_mode === \"real\" && r.is_mock !== false) {\n    issues.push(`${r.review_id}: llm_mode=real but is_mock!=false`);\n  }\n}\n\nreturn [{\n  json: {\n    ...batch,\n    _validation: {\n      passed: issues.filter(i => !i.startsWith(\"WARNING\")).length === 0,\n      issue_count: issues.length,\n      issues: issues\n    }\n  }\n}];"
       },
-      "id": "a1b2c3d4-1004-4000-8000-000000000004",
-      "name": "Aggregate Results",
+      "id": "n7-validate",
+      "name": "Validate Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1000, 300]
+      "position": [1500, 300],
+      "notes": "Quality gate: validates batch response structure, required fields, mock/real consistency."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-hr",
+              "leftValue": "={{ $json.needs_human_review_count }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "larger" }
+            }
+          ],
+          "combinator": "or"
+        }
+      },
+      "id": "n8-if-human-review",
+      "name": "IF Human Review / High Priority",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1750, 300],
+      "notes": "Route: if needs_human_review_count > 0 → Feishu Alert path. Else → Daily Report path."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Build Feishu Alert Message Card ──────────────────────────────\nconst batch = $input.first().json;\nconst urgentItems = (batch.results || []).filter(r =>\n  r.needs_human_review === true || r.priority === \"high\"\n);\n\nconst alerts = urgentItems.map(r => {\n  const evidence = (r.evidence || []).join(\"; \") || \"(无)\";\n  return [\n    `**【${r.review_id}】${r.issue_category} | ${r.priority}**`,\n    `摘要: ${r.summary_zh}`,\n    `建议: ${r.suggested_action_zh}`,\n    `证据: ${evidence}`,\n    `置信度: ${(r.confidence * 100).toFixed(0)}% | 模式: ${r.llm_mode}`\n  ].join(\"\\n\");\n});\n\nconst card = {\n  msg_type: \"interactive\",\n  card: {\n    header: {\n      title: { content: `⚠️ 评论需关注 — ${urgentItems.length} 条`, tag: \"plain_text\" },\n      template: urgentItems.length > 2 ? \"red\" : \"yellow\"\n    },\n    elements: [\n      {\n        tag: \"div\",\n        text: { tag: \"lark_md\", content: alerts.join(\"\\n---\\n\") }\n      },\n      {\n        tag: \"hr\"\n      },\n      {\n        tag: \"note\",\n        elements: [{\n          tag: \"plain_text\",\n          content: `总计: ${batch.total} | Mock: ${batch.mock_count} | 错误: ${batch.error_count} | ${new Date().toISOString()}`\n        }]\n      }\n    ]\n  }\n};\n\nreturn [{ json: card }];"
+      },
+      "id": "n9-build-feishu-msg",
+      "name": "Build Feishu Alert Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200],
+      "notes": "Formats high-priority / human-review items into a Feishu interactive message card."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "YOUR_FEISHU_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "n10-send-feishu",
+      "name": "Send Feishu Bot (Placeholder)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2250, 200],
+      "notes": "⚠️ PLACEHOLDER: Replace YOUR_FEISHU_WEBHOOK_URL with actual Feishu bot webhook. No real token in template."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Generate Daily Report ────────────────────────────────────────\nconst batch = $input.first().json;\n\nconst sentimentCounts = { positive: 0, neutral: 0, negative: 0 };\nconst categoryCounts = {};\nconst teamCounts = {};\n\nfor (const r of (batch.results || [])) {\n  sentimentCounts[r.sentiment] = (sentimentCounts[r.sentiment] || 0) + 1;\n  categoryCounts[r.issue_category] = (categoryCounts[r.issue_category] || 0) + 1;\n  teamCounts[r.responsible_team] = (teamCounts[r.responsible_team] || 0) + 1;\n}\n\nconst report = [\n  '# 📊 Daily Review Analysis Report',\n  '',\n  `> Generated: ${new Date().toISOString()} | Mode: ${batch.results?.[0]?.llm_mode || '?'}`,\n  '',\n  '## Summary',\n  '',\n  `| Metric | Count |`,\n  `|--------|-------|`,\n  `| Total Reviews | ${batch.total} |`,\n  `| Real LLM | ${batch.real_count} |`,\n  `| Mock | ${batch.mock_count} |`,\n  `| Errors | ${batch.error_count} |`,\n  `| Positive | ${sentimentCounts.positive} |`,\n  `| Neutral | ${sentimentCounts.neutral} |`,\n  `| Negative | ${sentimentCounts.negative} |`,\n  `| Needs Human Review | ${batch.needs_human_review_count} |`,\n  '',\n  '## Category Distribution',\n  '',\n  ...Object.entries(categoryCounts).map(([k, v]) => `- ${k}: ${v}`),\n  '',\n  '## Team Distribution',\n  '',\n  ...Object.entries(teamCounts).map(([k, v]) => `- ${k}: ${v}`)\n].join('\\n');\n\nreturn [{ json: { report_markdown: report, batch_summary: batch } }];"
+      },
+      "id": "n11-daily-report",
+      "name": "Generate Daily Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 450],
+      "notes": "Generates a Markdown daily report from batch results for non-urgent items."
     },
     {
       "parameters": {},
-      "id": "a1b2c3d4-1005-4000-8000-000000000005",
-      "name": "Display Report",
+      "id": "n12-output",
+      "name": "Output / Display Report",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [1250, 300]
+      "position": [2500, 300],
+      "notes": "Terminal node. Production: replace with Feishu Base API write, database insert, or file output."
     }
   ],
   "connections": {
-    "Manual Trigger": {
+    "Schedule Trigger (9:07 AM)": {
+      "main": [[ { "node": "Check Service Mode", "type": "main", "index": 0 } ]]
+    },
+    "Manual Trigger (Demo)": {
+      "main": [[ { "node": "Check Service Mode", "type": "main", "index": 0 } ]]
+    },
+    "Check Service Mode": {
+      "main": [[ { "node": "Read Reviews Source", "type": "main", "index": 0 } ]]
+    },
+    "Read Reviews Source": {
+      "main": [[ { "node": "Split In Batches", "type": "main", "index": 0 } ]]
+    },
+    "Split In Batches": {
+      "main": [[ { "node": "Call Analyze Batch API", "type": "main", "index": 0 } ]]
+    },
+    "Call Analyze Batch API": {
+      "main": [[ { "node": "Validate Result", "type": "main", "index": 0 } ]]
+    },
+    "Validate Result": {
+      "main": [[ { "node": "IF Human Review / High Priority", "type": "main", "index": 0 } ]]
+    },
+    "IF Human Review / High Priority": {
       "main": [
-        [
-          {
-            "node": "Generate Mock Reviews",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Build Feishu Alert Message", "type": "main", "index": 0 } ],
+        [ { "node": "Generate Daily Report", "type": "main", "index": 0 } ]
       ]
     },
-    "Generate Mock Reviews": {
-      "main": [
-        [
-          {
-            "node": "Call Analyze API",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Build Feishu Alert Message": {
+      "main": [[ { "node": "Send Feishu Bot (Placeholder)", "type": "main", "index": 0 } ]]
     },
-    "Call Analyze API": {
-      "main": [
-        [
-          {
-            "node": "Aggregate Results",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Send Feishu Bot (Placeholder)": {
+      "main": [[ { "node": "Output / Display Report", "type": "main", "index": 0 } ]]
     },
-    "Aggregate Results": {
-      "main": [
-        [
-          {
-            "node": "Display Report",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Generate Daily Report": {
+      "main": [[ { "node": "Output / Display Report", "type": "main", "index": 0 } ]]
     }
   },
   "settings": {
@@ -127,7 +232,7 @@
   },
   "staticData": null,
   "pinData": {},
-  "versionId": "1.0.0-template",
+  "versionId": "2.4.0-production",
   "active": false,
-  "description": "Cross-border e-commerce review monitoring and auto-classification. Generates mock reviews, calls FastAPI AI analysis, aggregates results into a daily report. Template for Milestone 4 — replace placeholder URLs with real endpoints before use. No API keys or secrets included."
+  "description": "V2-M4 Production workflow for ecommerce-review-agent. 12 nodes: Schedule Trigger + Manual Trigger → Check Mode → Read Reviews → SplitInBatches → Analyze Batch API → Validate → IF routing → Feishu Alert + Daily Report → Output. All URLs and tokens are placeholders — replace before production use. No secrets included. See n8n/workflow_design.md for full documentation."
 }

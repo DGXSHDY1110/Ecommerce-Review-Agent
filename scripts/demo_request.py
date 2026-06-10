@@ -30,6 +30,7 @@ import requests
 DEFAULT_ANALYZE_URL = "http://127.0.0.1:8000/api/v1/analyze"
 DEFAULT_BATCH_URL = "http://127.0.0.1:8000/api/v1/analyze_batch"
 DEFAULT_HEALTH_URL = "http://127.0.0.1:8000/api/v1/health"
+DEFAULT_MODE_URL = "http://127.0.0.1:8000/api/v1/mode"
 
 # ── Sample test data ───────────────────────────────────────────────────────────
 
@@ -110,6 +111,34 @@ def check_health(url: str) -> bool:
         return False
     except Exception as exc:
         print(f"\n❌ Unexpected error: {exc}")
+        return False
+
+
+def check_mode(url: str) -> bool:
+    """Call GET /api/v1/mode. Returns True on success."""
+    print(f"\n🔍 Checking mode at: {url}")
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        print_result("Service Mode", data)
+
+        mode = data.get("llm_mode", "unknown")
+        is_mock = data.get("use_mock_llm", None)
+        model = data.get("model", "?")
+        key_ok = data.get("api_key_configured", False)
+
+        print(f"\n  📋 Mode: {mode} | Mock: {is_mock} | Model: {model} | API Key: {'✅' if key_ok else '❌'}")
+        if is_mock:
+            print("  ⚠️  WARNING: Service is in MOCK mode — results are keyword-based, not real AI.")
+        elif not key_ok:
+            print("  ⚠️  WARNING: DEEPSEEK_API_KEY not configured — real LLM calls will fail.")
+        return True
+    except requests.ConnectionError:
+        print(f"\n❌ Cannot connect to {url}. Is the server running?")
+        return False
+    except Exception as exc:
+        print(f"\n❌ Error: {exc}")
         return False
 
 
@@ -222,9 +251,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "batch"],
+        choices=["single", "batch", "status"],
         default="single",
-        help="Analysis mode: single (default) or batch",
+        help="Demo mode: single (default), batch, or status (check service mode)",
     )
     parser.add_argument(
         "--url",
@@ -252,8 +281,10 @@ def main() -> None:
         print("\n✅ Health check passed. (--health mode: skipping analysis)")
         sys.exit(0)
 
-    # Run analysis
-    if args.mode == "batch":
+    # Run selected mode
+    if args.mode == "status":
+        ok = check_mode(args.url or DEFAULT_MODE_URL)
+    elif args.mode == "batch":
         batch_url = args.url or DEFAULT_BATCH_URL
         ok = analyze_batch(batch_url)
     else:

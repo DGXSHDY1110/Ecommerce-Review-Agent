@@ -246,6 +246,27 @@ Once the server is running, open:
 http://127.0.0.1:8000/docs
 ```
 
+### Service Mode (V2-M4)
+
+```bash
+curl http://127.0.0.1:8000/api/v1/mode
+```
+
+Returns current service configuration — whether running in real or mock mode, which model is configured, and whether the API key is present (never the key itself):
+
+```json
+{
+  "service": "ecommerce-review-agent",
+  "use_mock_llm": false,
+  "llm_mode": "real",
+  "model": "deepseek-v4-pro",
+  "base_url": "https://api.deepseek.com",
+  "api_key_configured": true
+}
+```
+
+n8n workflows should call `/api/v1/mode` at startup to determine how to handle results — mock results should not be used for business decisions.
+
 ### Health Check
 
 ```bash
@@ -416,8 +437,10 @@ The n8n workflow orchestrates the business automation layer — it triggers revi
 
 | Resource | Path | Description |
 |----------|------|-------------|
-| Workflow Design Doc | `n8n/workflow_design.md` | Full design spec: node sequence, Code Node examples, error handling, interview script |
-| Workflow Template | `n8n/review_workflow_template.json` | Best-effort importable JSON (4 nodes: Trigger → Code → HTTP → Code) |
+| Workflow Design Doc | `n8n/workflow_design.md` | **V2-M4 Production Edition** — 12-node design with Schedule Trigger, SplitInBatches, Validate, IF routing, Feishu placeholder, error handling |
+| Workflow Template | `n8n/review_workflow_template.json` | **V2-M4** — 12-node best-effort JSON template. Import or build manually per `workflow_design.md` |
+
+**Recommended n8n endpoint**: `POST /api/v1/analyze_batch` — one HTTP call processes multiple reviews, returns aggregate statistics. Individual review analysis is available at `POST /api/v1/analyze` for single-review use cases.
 
 ### How to Use
 

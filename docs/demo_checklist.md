@@ -6,11 +6,12 @@
 
 - [ ] Conda environment `ecommerce-agent` activated
 - [ ] All dependencies installed (`python -m pip install -r requirements.txt`)
-- [ ] All tests passing (`pytest -q`)
+- [ ] All tests passing (`pytest -q` — should show 213+)
 - [ ] FastAPI server ready to start
-- [ ] Sample data available (`data/mock/sample_reviews.csv`)
+- [ ] `data/real_reviews_sample.csv` available (42 reviews)
 - [ ] n8n installed and configured (Milestone 4+)
 - [ ] .env file configured with API keys (if using real LLM)
+- [ ] Mode endpoint verified: `curl http://127.0.0.1:8000/api/v1/mode`
 
 ## Demo Flow
 
@@ -176,6 +177,53 @@
 - [ ] If HTTP Request fails: "Let me check the FastAPI service is running..." → health check curl
 - [ ] If Code Node errors: "Let me verify the JavaScript syntax..." → check n8n Code Node editor
 - [ ] If n8n not responding: restart n8n with the correct env vars
+
+### 5b. V2-M4 Enhanced Demo: Service Mode + Batch API (2 minutes)
+
+**Pre-flight:**
+- [ ] FastAPI running in real mode: `uvicorn src.review_agent.api:app --host 0.0.0.0 --port 8000`
+- [ ] (Alt) Mock mode for offline: `USE_MOCK_LLM=true uvicorn ...`
+
+**Demo steps:**
+
+- [ ] **Check service mode:**
+  ```bash
+  curl http://127.0.0.1:8000/api/v1/mode | python -m json.tool
+  ```
+  → Show `llm_mode: "real"`, `model: "deepseek-v4-pro"`, `api_key_configured: true`.
+  → Point out: "This endpoint tells n8n (or any client) exactly what mode the service is in — no guessing, no silent fallback."
+
+- [ ] **Run demo script in status mode:**
+  ```bash
+  python scripts/demo_request.py --mode status
+  ```
+  → Shows mode check + health check in one command.
+
+- [ ] **Run batch analysis via demo script:**
+  ```bash
+  python scripts/demo_request.py --mode batch
+  ```
+  → Shows 3 reviews analyzed in batch, with summary counts and per-review results.
+  → Point out: `real_count`, `mock_count`, `error_count` in the batch response.
+  → Point out: Each result has `evidence`, `llm_mode`, `is_mock`, `model`.
+
+- [ ] **Run real LLM batch via CLI:**
+  ```bash
+  python scripts/run_batch.py --input data/real_reviews_sample.csv --limit 3
+  ```
+  → Show the complete real LLM pipeline: CSV → FastAPI → DeepSeek V4 Pro → structured JSON → Markdown report.
+
+- [ ] **Check report output:**
+  ```bash
+  head -40 outputs/reports/daily_report.md
+  ```
+  → Show category distribution, team distribution, human review items.
+
+**Interview explanation:**
+- "`/api/v1/mode` 让上游系统（n8n、监控）可以在调用分析接口之前先确认服务状态。"
+- "`/api/v1/analyze_batch` 一次调用处理多条评论，返回聚合统计——比逐条调 /analyze 效率高很多。"
+- "返回结果包含 `real_count` 和 `mock_count`——如果发现 mock_count > 0 但期望的是 real，就知道环境配置有问题。"
+- "n8n 工作流推荐用 batch 端点 + SplitInBatches 分批 + Validate 校验 + IF 路由——12 个节点的生产级编排。"
 
 ### 6. Q&A Preparation (1 minute)
 
