@@ -1,19 +1,25 @@
 """LLM client interface for calling DeepSeek API.
 
 Supports:
-- Real API calls via OpenAI-compatible Chat Completions endpoint
-- Mock mode for testing without API key
+- Real API calls via OpenAI-compatible Chat Completions endpoint (DEFAULT)
+- Mock mode for testing / offline demo (requires explicit --mock or USE_MOCK_LLM=true)
 - JSON parse retry with safe fallback
+- Pydantic validation retry
 - Error-case logging for observability
+
+V2-M2: No silent mock fallback. Real mode is the default. Missing API key
+in real mode raises a clear error instead of switching to mock.
 """
 
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
 import requests
+from pydantic import ValidationError
 
 from .config import Settings, get_settings
 from .schemas import ReviewInput, ReviewAnalysis
@@ -32,12 +38,11 @@ def _load_system_prompt() -> str:
     """
     prompt_path = Path(__file__).resolve().parent.parent.parent / "prompts" / "review_classification_prompt.md"
     if not prompt_path.exists():
-        # Fallback minimal prompt if file is missing
         return (
             "You are a cross-border e-commerce review classifier. "
             "Output ONLY valid JSON with: sentiment, issue_category, priority, "
-            "responsible_team, summary_zh, suggested_action_zh, confidence, needs_human_review. "
-            "No explanation."
+            "responsible_team, summary_zh, suggested_action_zh, confidence, "
+            "needs_human_review, evidence. No explanation."
         )
 
     content = prompt_path.read_text(encoding="utf-8")
@@ -47,7 +52,6 @@ def _load_system_prompt() -> str:
     if match:
         return match.group(1).strip()
 
-    # Fallback: return whole file content stripped of markdown headings
     return (
         "You are a cross-border e-commerce review classifier. "
         "Output ONLY valid JSON. No explanation."
@@ -60,7 +64,13 @@ SYSTEM_PROMPT = _load_system_prompt()
 # ── LLM Client ────────────────────────────────────────────────────────────────
 
 class LLMClient:
-    """Client for calling DeepSeek OpenAI-compatible Chat Completions API."""
+    """Client for calling DeepSeek OpenAI-compatible Chat Completions API.
+
+    V2-M2 behaviour:
+    - Default: real LLM (USE_MOCK_LLM=false).
+    - Mock only when USE_MOCK_LLM=true or --mock flag.
+    - Missing API key in real mode → ValueError (no silent fallback).
+    """
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
@@ -74,13 +84,29 @@ class LLMClient:
     # ── Public API ─────────────────────────────────────────────────────────
 
     def analyze_review(self, review: ReviewInput) -> ReviewAnalysis:
-        """Analyze a single review. Delegates to mock or real API."""
+        """Analyze a single review. Mock or real based on config.
+
+        V2-M2: NO silent fallback. If real mode and no API key, raises ValueError.
+        """
         if self.mock_mode:
             return self._mock_analyze(review)
 
+        # ── Real mode ──────────────────────────────────────────────────────
         if not self.api_key:
-            logger.warning("DEEPSEEK_API_KEY not set — falling back to mock mode")
-            return self._mock_analyze(review)
+            msg = (
+                "DEEPSEEK_API_KEY is not set but USE_MOCK_LLM is false. "
+                "Set DEEPSEEK_API_KEY in .env for real LLM mode, "
+                "or use USE_MOCK_LLM=true / --mock for explicit mock mode."
+            )
+            logger.error(msg)
+            log_error_case(
+                review_id=review.review_id,
+                error_type="MISSING_API_KEY",
+                error_message=msg,
+                fallback_used=True,
+                needs_human_review=True,
+            )
+            raise ValueError(msg)
 
         return self._call_api_with_retry(review)
 
@@ -89,13 +115,12 @@ class LLMClient:
     def _mock_analyze(self, review: ReviewInput) -> ReviewAnalysis:
         """Return a rule-based classification without calling any API.
 
-        Used when LLM_MOCK_MODE=true or when DEEPSEEK_API_KEY is missing.
+        Used ONLY when USE_MOCK_LLM=true or --mock flag.
 
-        Mock strategy:
-        - Clear reviews with explicit category keywords get confidence 0.85
-        - Moderate reviews get confidence 0.80
-        - Vague, short, or unclassifiable reviews get confidence 0.50
-        - This produces a realistic mix: some auto-pass, some need human review
+        V2-M2 improvements:
+        - Natural Chinese summaries (no more "评分X" templates).
+        - "unknown" team → suggested_action_zh uses generic human-review wording.
+        - Evidence extracted from review text via keyword matching.
         """
         rating = review.rating
         text_lower = review.review_text.lower()
@@ -114,27 +139,23 @@ class LLMClient:
         priority = self._classify_priority(rating, issue_category)
         responsible_team = self._classify_team(issue_category)
 
-        # ── Compute mock confidence ────────────────────────────────────
+        # Compute mock confidence
         confidence = self._compute_mock_confidence(
             text_lower, text_len, issue_category, rating, sentiment
         )
 
-        # ── Determine initial needs_human_review ────────────────────────
-        # Low confidence → always flag
-        # High confidence → let guardrails catch any remaining issues
         needs_review = confidence < 0.6
 
-        # Category-specific summaries (in Chinese)
-        category_summaries: dict[str, str] = {
-            "battery": f"用户反馈电池相关问题，评分{rating}。",
-            "image_quality": f"用户反馈图像/摄像头质量问题，评分{rating}。",
-            "logistics": f"用户反馈物流配送问题，评分{rating}。",
-            "customer_service": f"用户反馈客服/售后问题，评分{rating}。",
-            "price": f"用户反馈价格/性价比问题，评分{rating}。",
-            "description_mismatch": f"用户反馈产品与描述不符，评分{rating}。",
-            "product_quality": f"用户反馈产品质量问题，评分{rating}。",
-            "other": f"用户反馈无法明确归类，评分{rating}。",
-        }
+        # ── V2-M2: Natural Chinese summaries (no "评分X") ─────────────────
+        summary_zh = self._build_mock_summary(
+            rating, issue_category, responsible_team, text_len
+        )
+
+        # ── V2-M2: No "建议unknown团队" ────────────────────────────────────
+        suggested_action_zh = self._build_mock_action(issue_category, responsible_team)
+
+        # ── Extract evidence from review text ──────────────────────────────
+        evidence = self._extract_mock_evidence(text_lower, issue_category)
 
         return ReviewAnalysis(
             review_id=review.review_id,
@@ -142,14 +163,59 @@ class LLMClient:
             issue_category=issue_category,
             priority=priority,
             responsible_team=responsible_team,
-            summary_zh=category_summaries.get(
-                issue_category,
-                f"Mock分析：用户评分{rating}，类别{issue_category}。",
-            ),
-            suggested_action_zh=f"建议{responsible_team}团队查看该评论，确认是否需要跟进处理。",
+            summary_zh=summary_zh,
+            suggested_action_zh=suggested_action_zh,
             confidence=confidence,
             needs_human_review=needs_review,
+            evidence=evidence,
+            llm_mode="mock",
+            is_mock=True,
+            model="mock-rule-engine",
         )
+
+    @staticmethod
+    def _build_mock_summary(
+        rating: int, category: str, team: str, text_len: int
+    ) -> str:
+        """Build a natural-sounding Chinese summary for mock mode.
+
+        V2-M2: No more "用户反馈XX问题，评分X" templates.
+        """
+        category_cn: dict[str, str] = {
+            "battery": "电池续航或充电",
+            "image_quality": "图像/摄像头质量",
+            "logistics": "物流配送",
+            "customer_service": "客服或售后",
+            "price": "价格或性价比",
+            "description_mismatch": "产品与描述一致",
+            "product_quality": "产品质量",
+            "other": "无法明确归类",
+        }
+
+        text_hint = "内容简短" if text_len < 30 else "有较详细描述"
+
+        cat_name = category_cn.get(category, "未知")
+        if rating <= 2:
+            return f"客户对{cat_name}不满意（{text_hint}），给出{rating}星低分。"
+        elif rating == 3:
+            return f"客户对产品的评价中性，主要关注{cat_name}方面。"
+        else:
+            return f"客户对产品整体满意，但提到{cat_name}方面有改进空间。"
+
+    @staticmethod
+    def _build_mock_action(category: str, team: str) -> str:
+        """Build mock suggested_action_zh. V2-M2: no 'unknown' team exposure."""
+        if team == "unknown":
+            return "建议运营同学人工复核该评论，确认问题类别并协调相应责任团队跟进。"
+        team_cn: dict[str, str] = {
+            "operations": "运营",
+            "product": "产品",
+            "supply_chain": "供应链",
+            "customer_service": "客服",
+            "marketing": "市场",
+        }
+        team_name = team_cn.get(team, "相关")
+        return f"建议{team_name}团队查看该评论详情，评估是否需要跟进处理或联系客户。"
 
     @staticmethod
     def _compute_mock_confidence(
@@ -159,34 +225,17 @@ class LLMClient:
         rating: int,
         sentiment: str,
     ) -> float:
-        """Compute a mock confidence score based on review clarity.
-
-        Rules (priority order):
-        1. Short or vague text → 0.50 (need human review)
-        2. Category is "other" → 0.50 (can't classify)
-        3. Rating/sentiment mismatch → 0.50 (uncertain)
-        4. Clear category + long descriptive text → 0.85
-        5. Clear category + reasonable text → 0.80
-        """
-        # Very short reviews are inherently uncertain
+        """Compute a mock confidence score based on review clarity."""
         if text_len < 30:
             return 0.50
-
-        # "other" category means we couldn't match any keyword
         if category == "other":
             return 0.50
-
-        # Rating sent strong signal but model sentiment disagrees
         if rating <= 2 and sentiment != "negative":
             return 0.50
         if rating >= 4 and sentiment != "positive":
             return 0.50
-
-        # Clear category + detailed review → high confidence
         if text_len >= 60:
             return 0.85
-
-        # Reasonable review with a matched category
         return 0.80
 
     def _classify_category(self, text_lower: str) -> str:
@@ -227,30 +276,73 @@ class LLMClient:
         }
         return mapping.get(category, "unknown")
 
+    @staticmethod
+    def _extract_mock_evidence(text_lower: str, category: str) -> list[str]:
+        """Extract evidence-like fragments from review text for mock mode."""
+        keyword_map: dict[str, list[str]] = {
+            "battery": ["battery", "charge", "charging", "drain", "power"],
+            "image_quality": ["blurry", "night vision", "camera", "image", "photo", "video", "resolution"],
+            "logistics": ["shipping", "delivery", "package", "arrived", "tracking"],
+            "customer_service": ["customer service", "support", "refund", "return", "contact"],
+            "price": ["price", "expensive", "cheap", "worth", "value", "cost"],
+            "description_mismatch": ["description", "match", "wrong", "different", "not as"],
+            "product_quality": ["quality", "build", "broke", "defect", "stop", "fail", "issue", "problem"],
+        }
+
+        keywords = keyword_map.get(category, [])
+        if not keywords:
+            return []
+
+        evidence: list[str] = []
+        for kw in keywords:
+            if kw in text_lower:
+                idx = text_lower.find(kw)
+                start = max(0, idx - 15)
+                end = min(len(text_lower), idx + len(kw) + 45)
+                fragment = text_lower[start:end].strip()
+                if start > 0:
+                    space_idx = fragment.find(" ")
+                    if space_idx != -1 and space_idx < 20:
+                        fragment = fragment[space_idx:].strip()
+                if fragment and fragment not in evidence:
+                    evidence.append(fragment)
+                if len(evidence) >= 2:
+                    break
+
+        return evidence
+
     # ── Real API call ───────────────────────────────────────────────────────
 
     def _call_api_with_retry(self, review: ReviewInput) -> ReviewAnalysis:
         """Call the DeepSeek API, retrying on transient failures.
 
         Retry strategy:
-        - JSON parse / validation errors → retry (the model might fix itself)
+        - JSON parse / Pydantic validation errors → retry (model might fix itself)
         - Network / timeout errors → retry
         - Non-2xx HTTP responses → retry (except 4xx client errors)
         - After all retries exhausted → safe fallback + error log
         """
         last_error: Optional[Exception] = None
-        max_attempts = self.settings.retry_max_attempts
+        # total attempts = 1 (initial) + max_retries
+        max_attempts = 1 + self.max_retries
 
         for attempt in range(max_attempts):
             try:
                 result = self._call_api_once(review)
-                # Success — if we previously had errors, log a recovery note
                 if attempt > 0:
                     logger.info(
                         "LLM call succeeded on attempt %d for review %s",
                         attempt + 1, review.review_id,
                     )
                 return result
+
+            except ValidationError as exc:
+                last_error = exc
+                logger.warning(
+                    "Pydantic validation failed (attempt %d/%d) for review %s: %s",
+                    attempt + 1, max_attempts, review.review_id,
+                    _safe_error_message(exc),
+                )
 
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
@@ -269,7 +361,16 @@ class LLMClient:
             except requests.HTTPError as exc:
                 last_error = exc
                 status = exc.response.status_code if exc.response is not None else "?"
-                # Do not retry on 4xx client errors (bad request, unauthorized, etc.)
+
+                # ── V2-M2: model_not_found hint ────────────────────────────
+                if status == 404:
+                    logger.error(
+                        "LLM API 404 for review %s — model '%s' may not exist. "
+                        "Check DEEPSEEK_MODEL in .env (current: %s).",
+                        review.review_id, self.model, self.model,
+                    )
+
+                # Do not retry on 4xx client errors
                 if isinstance(status, int) and 400 <= status < 500:
                     logger.error(
                         "LLM API client error HTTP %s for review %s — not retrying",
@@ -289,7 +390,7 @@ class LLMClient:
                     _safe_error_message(exc),
                 )
 
-        # ── All retries exhausted — return safe fallback ──────────────────
+        # ── All retries exhausted — safe fallback ──────────────────────────
         error_type = _classify_error(last_error)
         error_msg = _safe_error_message(last_error) if last_error else "unknown"
 
@@ -309,7 +410,12 @@ class LLMClient:
         return self._safe_fallback(review)
 
     def _call_api_once(self, review: ReviewInput) -> ReviewAnalysis:
-        """Make a single API call and parse the response."""
+        """Make a single API call, extract JSON, validate with Pydantic.
+
+        Returns ReviewAnalysis on success.
+        Raises ValidationError, JSONDecodeError, ValueError, or requests exceptions.
+        """
+        start_time = time.time()
         user_message = self._build_user_message(review)
         payload = {
             "model": self.model,
@@ -338,9 +444,23 @@ class LLMClient:
         data = response.json()
         content = data["choices"][0]["message"]["content"]
 
-        # Extract JSON from the response (may be wrapped in ```json fences)
+        # ── Extract JSON from the response ─────────────────────────────────
         parsed = self._extract_json(content)
-        return ReviewAnalysis(**parsed)
+
+        # V2-M1/2: Inject code-populated fields
+        parsed.setdefault("evidence", [])
+        parsed["llm_mode"] = "real"
+        parsed["is_mock"] = False
+        parsed["model"] = self.model
+
+        # ── Pydantic validation (raises ValidationError on failure) ────────
+        result = ReviewAnalysis(**parsed)
+
+        # Set processing time
+        elapsed_ms = (time.time() - start_time) * 1000.0
+        result.processing_time_ms = round(elapsed_ms, 2)
+
+        return result
 
     def _build_user_message(self, review: ReviewInput) -> str:
         """Build the user message from a ReviewInput."""
@@ -361,17 +481,16 @@ class LLMClient:
     def _extract_json(text: str) -> dict:
         """Extract a JSON object from LLM output.
 
-        Handles several common malformations:
+        Handles:
         - `` ```json ... ``` `` fenced blocks
         - `` ``` ... ``` `` untyped fenced blocks
         - Leading/trailing whitespace and stray newlines
-        - Text **before** or **after** the JSON object
+        - Text before or after the JSON object
         - Multiple consecutive code blocks (takes the first one)
         """
         text = text.strip()
 
-        # ── Strategy 1: extract content from markdown code fences ─────────
-        # Look for the pattern: ```json\n{...}\n``` or ```\n{...}\n```
+        # Strategy 1: extract from markdown code fences
         fence_match = re.search(
             r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL
         )
@@ -382,9 +501,9 @@ class LLMClient:
                 if isinstance(parsed, dict):
                     return parsed
             except json.JSONDecodeError:
-                pass  # fall through to next strategy
+                pass
 
-        # ── Strategy 2: find the outermost { ... } pair ───────────────────
+        # Strategy 2: find the outermost { ... } pair
         brace_start = text.find("{")
         brace_end = text.rfind("}")
         if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
@@ -394,9 +513,9 @@ class LLMClient:
                 if isinstance(parsed, dict):
                     return parsed
             except json.JSONDecodeError:
-                pass  # fall through to next strategy
+                pass
 
-        # ── Strategy 3: try parsing the whole text as-is ──────────────────
+        # Strategy 3: try parsing the whole text as-is
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
@@ -408,9 +527,7 @@ class LLMClient:
     def _safe_fallback(self, review: ReviewInput) -> ReviewAnalysis:
         """Return a safe fallback classification when LLM fails.
 
-        Uses simple rating-based heuristics for sentiment and priority,
-        and defaults *everything else* to conservative values so that
-        the downstream workflow always has a valid result to work with.
+        V2-M2: Updated summary_zh to use the new wording.
         """
         rating = review.rating
         if rating <= 2:
@@ -429,10 +546,14 @@ class LLMClient:
             issue_category="other",
             priority=priority,
             responsible_team="unknown",
-            summary_zh="（AI 解析失败，已使用安全兜底结果）",
-            suggested_action_zh="请人工查看该评论原文并手动完成分类。",
+            summary_zh="模型调用或解析失败，需要人工复核。",
+            suggested_action_zh="请人工查看该评论，并根据原始评论内容确认分类结果。",
             confidence=0.0,
             needs_human_review=True,
+            evidence=[],
+            llm_mode="real",
+            is_mock=False,
+            model=self.model,
         )
 
 
@@ -444,6 +565,8 @@ def _classify_error(exc: Optional[Exception]) -> str:
         return "UNKNOWN"
     if isinstance(exc, json.JSONDecodeError):
         return "JSON_PARSE_FAILED"
+    if isinstance(exc, ValidationError):
+        return "VALIDATION_FAILED"
     if isinstance(exc, ValueError):
         return "VALIDATION_FAILED"
     if isinstance(exc, requests.Timeout):
@@ -464,15 +587,18 @@ def _safe_error_message(exc: Exception) -> str:
     """Return a user-safe error message that never leaks API keys or headers."""
     msg = str(exc)
 
-    # If the exception message looks like it might contain a URL with a key,
-    # or request headers, truncate to a generic message.
     if len(msg) > 500:
         msg = msg[:500] + "…"
 
-    # Redact any obvious "Authorization: Bearer sk-…" patterns
+    # Redact Bearer tokens
     msg = re.sub(r"Bearer\s+[\w\-\.]+", "Bearer ***REDACTED***", msg, flags=re.IGNORECASE)
-    # Redact any "key=" or "api_key=" patterns
-    msg = re.sub(r"(?:api[_-]?key|apikey|secret|token)=[\w\-\.]+", r"\1=***REDACTED***", msg, flags=re.IGNORECASE)
+    # Redact key/secret/token params (capture key name, replace value)
+    msg = re.sub(
+        r"((?:api[_-]?key|apikey|secret|token))=[\w\-\.]+",
+        r"\1=***REDACTED***",
+        msg,
+        flags=re.IGNORECASE,
+    )
 
     return msg
 

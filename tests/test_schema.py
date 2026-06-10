@@ -1,4 +1,7 @@
-"""Tests for Pydantic schemas — ReviewInput, ReviewAnalysis, batch models."""
+"""Tests for Pydantic schemas — ReviewInput, ReviewAnalysis, batch models.
+
+V2-M1: Added strict enum validation tests and new field tests.
+"""
 
 import pytest
 from pydantic import ValidationError
@@ -161,6 +164,130 @@ class TestReviewAnalysis:
         assert analysis.needs_human_review is False
         assert analysis.summary_zh == "电池续航差。"
 
+    # ── V2-M1: Strict enum validation ──────────────────────────────────────
+
+    def test_invalid_sentiment_raises_error(self):
+        """Non-literal sentiment like 'angry' should raise ValidationError."""
+        with pytest.raises(ValidationError):
+            ReviewAnalysis(review_id="r001", sentiment="angry")
+
+    def test_invalid_issue_category_raises_error(self):
+        """Non-literal issue_category like 'shipping' should raise ValidationError."""
+        with pytest.raises(ValidationError):
+            ReviewAnalysis(review_id="r001", issue_category="shipping")
+
+    def test_invalid_priority_raises_error(self):
+        """Non-literal priority like 'urgent' should raise ValidationError."""
+        with pytest.raises(ValidationError):
+            ReviewAnalysis(review_id="r001", priority="urgent")
+
+    def test_invalid_responsible_team_raises_error(self):
+        """Non-literal responsible_team like 'engineering' should raise ValidationError."""
+        with pytest.raises(ValidationError):
+            ReviewAnalysis(review_id="r001", responsible_team="engineering")
+
+    def test_all_valid_sentiments_accepted(self):
+        """All three valid sentiment values should be accepted."""
+        for s in ("positive", "neutral", "negative"):
+            analysis = ReviewAnalysis(review_id="r001", sentiment=s)
+            assert analysis.sentiment == s
+
+    def test_all_valid_priorities_accepted(self):
+        """All three valid priority values should be accepted."""
+        for p in ("high", "medium", "low"):
+            analysis = ReviewAnalysis(review_id="r001", priority=p)
+            assert analysis.priority == p
+
+    # ── V2-M1: New fields ─────────────────────────────────────────────────
+
+    def test_evidence_field_default(self):
+        """evidence should default to empty list."""
+        analysis = ReviewAnalysis(review_id="r001")
+        assert analysis.evidence == []
+        assert isinstance(analysis.evidence, list)
+
+    def test_evidence_field_with_data(self):
+        """evidence should accept list of strings."""
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            evidence=["Battery drains too fast", "night vision is blurry"],
+        )
+        assert len(analysis.evidence) == 2
+        assert "Battery drains too fast" in analysis.evidence
+
+    def test_llm_mode_field_default(self):
+        """llm_mode should default to 'real'."""
+        analysis = ReviewAnalysis(review_id="r001")
+        assert analysis.llm_mode == "real"
+
+    def test_llm_mode_only_accepts_real_or_mock(self):
+        """llm_mode should only accept 'real' or 'mock'."""
+        # Valid values
+        for mode in ("real", "mock"):
+            analysis = ReviewAnalysis(review_id="r001", llm_mode=mode)
+            assert analysis.llm_mode == mode
+
+        # Invalid value
+        with pytest.raises(ValidationError):
+            ReviewAnalysis(review_id="r001", llm_mode="fake")
+
+    def test_is_mock_field_default(self):
+        """is_mock should default to False."""
+        analysis = ReviewAnalysis(review_id="r001")
+        assert analysis.is_mock is False
+
+    def test_is_mock_consistency_with_llm_mode(self):
+        """is_mock should be consistent with llm_mode."""
+        real_analysis = ReviewAnalysis(review_id="r001", llm_mode="real", is_mock=False)
+        assert real_analysis.is_mock is False
+
+        mock_analysis = ReviewAnalysis(review_id="r002", llm_mode="mock", is_mock=True)
+        assert mock_analysis.is_mock is True
+
+    def test_model_field_default(self):
+        """model should default to 'unknown'."""
+        analysis = ReviewAnalysis(review_id="r001")
+        assert analysis.model == "unknown"
+
+    def test_model_field_custom(self):
+        """model should accept custom string values."""
+        analysis = ReviewAnalysis(review_id="r001", model="deepseek-v4-pro")
+        assert analysis.model == "deepseek-v4-pro"
+
+    def test_processing_time_ms_field_default(self):
+        """processing_time_ms should default to None."""
+        analysis = ReviewAnalysis(review_id="r001")
+        assert analysis.processing_time_ms is None
+
+    def test_processing_time_ms_field_set(self):
+        """processing_time_ms should accept float values."""
+        analysis = ReviewAnalysis(review_id="r001", processing_time_ms=1234.5)
+        assert analysis.processing_time_ms == 1234.5
+
+    def test_v2_fields_in_full_output(self):
+        """Full ReviewAnalysis should include all V2-M1 fields."""
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            sentiment="negative",
+            issue_category="battery",
+            priority="high",
+            responsible_team="product",
+            summary_zh="电池问题。",
+            suggested_action_zh="检查电池。",
+            confidence=0.9,
+            needs_human_review=False,
+            evidence=["battery drains"],
+            llm_mode="real",
+            is_mock=False,
+            model="deepseek-v4-pro",
+            processing_time_ms=500.0,
+        )
+        assert analysis.evidence == ["battery drains"]
+        assert analysis.llm_mode == "real"
+        assert analysis.is_mock is False
+        assert analysis.model == "deepseek-v4-pro"
+        assert analysis.processing_time_ms == 500.0
+
 
 class TestBatchModels:
     """Tests for BatchAnalysisRequest and BatchAnalysisResponse."""
@@ -210,3 +337,34 @@ class TestBatchModels:
         assert response.total == 2
         assert response.needs_human_review_count == 1
         assert len(response.results) == 2
+
+    # ── V2-M1: New batch fields ───────────────────────────────────────────
+
+    def test_batch_response_error_count_default(self):
+        """error_count should default to 0."""
+        response = BatchAnalysisResponse()
+        assert response.error_count == 0
+
+    def test_batch_response_real_count_default(self):
+        """real_count should default to 0."""
+        response = BatchAnalysisResponse()
+        assert response.real_count == 0
+
+    def test_batch_response_mock_count_default(self):
+        """mock_count should default to 0."""
+        response = BatchAnalysisResponse()
+        assert response.mock_count == 0
+
+    def test_batch_response_with_v2_counts(self):
+        """BatchAnalysisResponse should accept V2-M1 count fields."""
+        response = BatchAnalysisResponse(
+            results=[ReviewAnalysis(review_id="r001")],
+            total=1,
+            needs_human_review_count=1,
+            error_count=1,
+            real_count=0,
+            mock_count=1,
+        )
+        assert response.error_count == 1
+        assert response.real_count == 0
+        assert response.mock_count == 1

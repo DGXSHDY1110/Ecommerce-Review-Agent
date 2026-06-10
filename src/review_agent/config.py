@@ -1,9 +1,33 @@
-"""Application configuration loaded from environment variables."""
+"""Application configuration loaded from environment variables.
+
+V2-M1 changes:
+- Default model changed to deepseek-v4-pro.
+- USE_MOCK_LLM is the canonical mock toggle (LLM_MOCK_MODE kept for backward compat).
+- LOW_RATING_THRESHOLD and LOG_LEVEL are now configurable via env.
+- USE_MOCK_LLM has higher priority than LLM_MOCK_MODE.
+"""
 
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _resolve_mock_mode() -> bool:
+    """Resolve mock mode from env vars.
+
+    USE_MOCK_LLM has higher priority than LLM_MOCK_MODE.
+    Default: false (real LLM mode).
+    """
+    use_mock = os.getenv("USE_MOCK_LLM", "").lower()
+    if use_mock in ("true", "1", "yes"):
+        return True
+    if use_mock in ("false", "0", "no"):
+        return False
+
+    # Fallback to legacy LLM_MOCK_MODE
+    legacy = os.getenv("LLM_MOCK_MODE", "").lower()
+    return legacy in ("true", "1", "yes")
 
 
 class Settings:
@@ -12,12 +36,15 @@ class Settings:
     # DeepSeek API
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
     # LLM client tuning
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
-    llm_mock_mode: bool = os.getenv("LLM_MOCK_MODE", "false").lower() in ("true", "1", "yes")
+
+    # Mock mode (V2-M1: canonical name is USE_MOCK_LLM; LLM_MOCK_MODE is legacy fallback)
+    llm_mock_mode: bool = _resolve_mock_mode()
+    use_mock_llm: bool = llm_mock_mode  # alias for consistency
 
     # App server
     app_host: str = os.getenv("APP_HOST", "0.0.0.0")
@@ -28,8 +55,11 @@ class Settings:
 
     # Guardrail thresholds
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
+    low_rating_threshold: int = int(os.getenv("LOW_RATING_THRESHOLD", "2"))
     retry_max_attempts: int = int(os.getenv("RETRY_MAX_ATTEMPTS", "2"))
-    low_rating_threshold: int = 2
+
+    # Observability
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 
 def get_settings() -> Settings:

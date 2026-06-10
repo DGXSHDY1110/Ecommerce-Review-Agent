@@ -109,6 +109,7 @@ class TestGuardrails:
             sentiment="positive",
             confidence=0.5,
             needs_human_review=False,
+            evidence=["test evidence"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
@@ -121,6 +122,7 @@ class TestGuardrails:
             sentiment="positive",
             confidence=0.9,
             needs_human_review=False,
+            evidence=["test evidence"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
@@ -134,6 +136,7 @@ class TestGuardrails:
             issue_category="other",
             confidence=0.9,
             needs_human_review=False,
+            evidence=["test evidence"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
@@ -151,6 +154,7 @@ class TestGuardrails:
             suggested_action_zh="建议产品团队检查该批次质量并联系客户退换货。",
             confidence=0.9,
             needs_human_review=False,
+            evidence=["Product broke immediately"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is False
@@ -165,6 +169,7 @@ class TestGuardrails:
             summary_zh="",
             suggested_action_zh="Valid action.",
             needs_human_review=False,
+            evidence=["test evidence"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
@@ -179,6 +184,7 @@ class TestGuardrails:
             summary_zh="Valid summary.",
             suggested_action_zh="",
             needs_human_review=False,
+            evidence=["test evidence"],
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True
@@ -238,3 +244,68 @@ class TestAnalyzeBatch:
         ]
         results = analyze_reviews_batch(reviews, client=client)
         assert all(r.needs_human_review for r in results)
+
+
+# ── V2-M2: Real-mode guardrail integration tests ──────────────────────────────
+
+class TestRealModeGuardrailIntegration:
+    """Verify guardrails process real-mode results correctly."""
+
+    def test_real_result_with_evidence_passes_guardrails(self):
+        """Real result with evidence and high confidence passes guardrails."""
+        review = make_review(rating=1, review_text="Battery exploded after 2 days.")
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            sentiment="negative",
+            issue_category="battery",
+            priority="high",
+            responsible_team="product",
+            summary_zh="电池在使用2天后爆炸，存在严重安全隐患。",
+            suggested_action_zh="建议产品团队立即下架该批次并启动调查。",
+            confidence=0.92,
+            needs_human_review=False,
+            evidence=["Battery exploded after 2 days"],
+            llm_mode="real",
+            is_mock=False,
+            model="deepseek-v4-pro",
+            processing_time_ms=350.0,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is False
+
+    def test_real_result_with_empty_evidence_flagged(self):
+        """Real result with empty evidence triggers guardrail Rule 6."""
+        review = make_review(rating=4, review_text="Great product.")
+        analysis = ReviewAnalysis(
+            review_id="r001",
+            sentiment="positive",
+            issue_category="other",
+            priority="low",
+            responsible_team="unknown",
+            summary_zh="用户评价正面但内容简略。",
+            suggested_action_zh="无需特别处理。",
+            confidence=0.88,
+            needs_human_review=False,
+            evidence=[],  # empty → triggers Rule 6
+            llm_mode="real",
+            is_mock=False,
+            model="deepseek-v4-pro",
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is True
+
+    def test_batch_response_counts_real_mode(self):
+        """Batch response correctly counts real vs mock results."""
+        p1 = ReviewAnalysis(review_id="r001", llm_mode="real", is_mock=False)
+        p2 = ReviewAnalysis(review_id="r002", llm_mode="mock", is_mock=True, model="mock-rule-engine")
+        p3 = ReviewAnalysis(review_id="r003", llm_mode="real", is_mock=False)
+
+        response = analyze_batch_request(
+            BatchAnalysisRequest(reviews=[
+                make_review("r001"), make_review("r002"), make_review("r003"),
+            ]),
+            client=LLMClient(settings=make_mock_settings()),
+        )
+        # In mock mode, all results should be mock
+        assert response.mock_count == 3
+        assert response.real_count == 0

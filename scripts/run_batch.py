@@ -4,9 +4,14 @@ Reads review data from a CSV file, runs the classification workflow,
 and writes results to JSON and a Markdown report.
 
 Usage:
-    python scripts/run_batch.py --mock
+    # Real LLM (default) — requires DEEPSEEK_API_KEY in .env
+    python scripts/run_batch.py --input data/mock/sample_reviews.csv --limit 3
+
+    # Explicit mock mode — no API key needed
     python scripts/run_batch.py --input data/mock/sample_reviews.csv --mock
-    python scripts/run_batch.py --input data/mock/sample_reviews.csv
+
+    # Real LLM with full dataset
+    python scripts/run_batch.py --input data/real_reviews_sample.csv
 """
 
 import argparse
@@ -33,7 +38,7 @@ from src.review_agent.report import generate_daily_report
 from src.review_agent.utils import log_error_case, ensure_output_dir
 
 
-def read_reviews_csv(csv_path: str) -> list[ReviewInput]:
+def read_reviews_csv(csv_path: str, limit: Optional[int] = None) -> list[ReviewInput]:
     """Read reviews from a CSV file and return a list of ReviewInput objects.
 
     Expected CSV columns:
@@ -53,6 +58,8 @@ def read_reviews_csv(csv_path: str) -> list[ReviewInput]:
                 created_at=row["created_at"].strip(),
             )
             reviews.append(review)
+            if limit is not None and len(reviews) >= limit:
+                break
     return reviews
 
 
@@ -91,7 +98,7 @@ def count_error_log_entries() -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run batch review analysis using DeepSeek LLM or mock mode."
+        description="Run batch review analysis using DeepSeek LLM (default) or mock mode."
     )
     parser.add_argument(
         "--input",
@@ -111,14 +118,19 @@ def main() -> None:
     parser.add_argument(
         "--mock",
         action="store_true",
-        help="Run in mock mode without calling the real DeepSeek API",
+        help="Run in explicit mock mode (no API key needed)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit analysis to the first N reviews (useful for real LLM smoke tests)",
     )
     args = parser.parse_args()
 
-    # Resolve input path relative to project root
+    # Resolve input path
     input_path = os.path.join(PROJECT_ROOT, args.input)
     if not os.path.isfile(input_path):
-        # Also try as-is and legacy path
         alt_path = os.path.join(PROJECT_ROOT, "data", "sample_reviews.csv")
         if os.path.isfile(alt_path):
             input_path = alt_path
@@ -129,26 +141,35 @@ def main() -> None:
 
     output_json = os.path.join(PROJECT_ROOT, args.output_json)
     output_report = os.path.join(PROJECT_ROOT, args.output_report)
-
-    # Create output directories
     ensure_output_dirs(output_json, output_report)
 
-    # Configure settings
+    # ── Configure mode ─────────────────────────────────────────────────────
     settings = get_settings()
+    is_mock = args.mock or settings.llm_mock_mode
+
     if args.mock:
         settings.llm_mock_mode = True
-        print("🔧 Running in MOCK mode — no real API calls will be made.")
+        print("🔧 Running in EXPLICIT MOCK mode — no real API calls.")
+    elif settings.llm_mock_mode:
+        print("🔧 Running in MOCK mode (USE_MOCK_LLM=true) — no real API calls.")
     else:
+        # ── Real mode: require API key ─────────────────────────────────────
         if not settings.deepseek_api_key:
-            print("⚠️  DEEPSEEK_API_KEY not set. Switching to mock mode automatically.")
-            settings.llm_mock_mode = True
-        else:
-            print(f"🚀 Running with DeepSeek API: model={settings.deepseek_model}")
+            print("❌ ERROR: Real LLM mode requires DEEPSEEK_API_KEY.")
+            print("   Option 1: Set DEEPSEEK_API_KEY in .env")
+            print("   Option 2: Use --mock for explicit mock mode")
+            print(f"   Current DEEPSEEK_MODEL: {settings.deepseek_model}")
+            sys.exit(1)
+        print(f"🚀 Running with DeepSeek API")
+        print(f"   Model:       {settings.deepseek_model}")
+        print(f"   Base URL:    {settings.deepseek_base_url}")
+        if args.limit:
+            print(f"   Limit:       {args.limit} reviews (smoke test)")
 
-    # Read input
+    # ── Read input ─────────────────────────────────────────────────────────
     print(f"📖 Reading reviews from: {input_path}")
     try:
-        reviews = read_reviews_csv(input_path)
+        reviews = read_reviews_csv(input_path, limit=args.limit)
     except Exception as e:
         print(f"❌ Failed to read CSV: {e}")
         sys.exit(1)
@@ -159,12 +180,16 @@ def main() -> None:
         print("⚠️  No reviews to process. Exiting.")
         sys.exit(0)
 
-    # Run analysis
+    # ── Run analysis ───────────────────────────────────────────────────────
     print("🔍 Analyzing reviews...")
     request = BatchAnalysisRequest(reviews=reviews)
     client = LLMClient(settings=settings)
     try:
         response = analyze_batch_request(request, client=client)
+    except ValueError as e:
+        # Missing API key in real mode
+        print(f"❌ Configuration error: {e}")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Analysis failed: {e}")
         log_error_case(
@@ -176,73 +201,58 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Save results
+    # ── Save results ───────────────────────────────────────────────────────
     print(f"💾 Saving JSON results to: {output_json}")
     save_json(output_json, response)
 
-    # Generate and save report
+    # ── Generate and save report ───────────────────────────────────────────
     print(f"📝 Generating report: {output_report}")
     rating_map = {r.review_id: r.rating for r in reviews}
     report_md = generate_daily_report(response.results, rating_map=rating_map)
     save_report(output_report, report_md)
 
-    # ── Final summary ─────────────────────────────────────────────────
-    print()
-    print("=" * 50)
-    print("✅ Batch analysis complete!")
-    print(f"   Total reviews:         {response.total}")
-    print(f"   Needs human review:    {response.needs_human_review_count}")
-    print(f"   JSON output:           {output_json}")
-    print(f"   Report:                {output_report}")
+    # ── Final summary ──────────────────────────────────────────────────────
+    mode_label = "MOCK" if is_mock else "REAL"
+    model_label = "mock-rule-engine" if is_mock else settings.deepseek_model
 
-    # ── Human review warning ──────────────────────────────────────────
+    print()
+    print("=" * 55)
+    print(f"✅ Batch analysis complete!          [{mode_label} mode]")
+    print(f"   Model:                  {model_label}")
+    print(f"   Total reviews:          {response.total}")
+    print(f"   Real LLM count:         {response.real_count}")
+    print(f"   Mock count:             {response.mock_count}")
+    print(f"   Error count:            {response.error_count}")
+    print(f"   Needs human review:     {response.needs_human_review_count}")
+    print(f"   JSON output:            {output_json}")
+    print(f"   Report:                 {output_report}")
+
+    # ── Human review summary ───────────────────────────────────────────────
     if response.needs_human_review_count > 0:
         print()
-        print("⚠️ ════════════════════════════════════════════════════")
-        print(f"   ⚠️  {response.needs_human_review_count} 条评论需要人工复核！")
-        print("   ════════════════════════════════════════════════════")
-        print()
-        human_review_items = [
-            r for r in response.results if r.needs_human_review
-        ]
-        print("   需人工复核的评论：")
-        print(f"   {'ID':<8} {'评分':<5} {'情绪':<10} {'类别':<20} {'置信度':<7}")
-        print(f"   {'─'*8} {'─'*5} {'─'*10} {'─'*20} {'─'*7}")
-        for r in human_review_items[:20]:  # Show at most 20
-            original_rating = rating_map.get(r.review_id, "?")
-            print(
-                f"   {r.review_id:<8} {str(original_rating):<5} "
-                f"{r.sentiment:<10} {r.issue_category:<20} {r.confidence:<7.2f}"
-            )
-        if len(human_review_items) > 20:
-            print(f"   ... 还有 {len(human_review_items) - 20} 条未显示")
-        print()
-        print("   请查看以下文件了解详情：")
-        print(f"   - 报告: {output_report}")
-        print(f"   - 结果: {output_json}")
-
-        # Check error log
-        error_count = count_error_log_entries()
-        error_log_path = PROJECT_ROOT / "outputs" / "results" / "error_cases.jsonl"
-        if error_count > 0:
-            print(f"   - 错误日志: {error_log_path} ({error_count} 条记录)")
-        print("   ════════════════════════════════════════════════════")
+        print(
+            f"⚠️  {response.needs_human_review_count} review(s) need human review:"
+        )
+        print(f"   {'ID':<8} {'Rating':<7} {'Sentiment':<10} {'Category':<22} {'Confidence':<8}")
+        print(f"   {'─'*8} {'─'*7} {'─'*10} {'─'*22} {'─'*8}")
+        for r in response.results:
+            if r.needs_human_review:
+                orig_rating = rating_map.get(r.review_id, "?")
+                print(
+                    f"   {r.review_id:<8} {str(orig_rating):<7} "
+                    f"{r.sentiment:<10} {r.issue_category:<22} {r.confidence:<8.2f}"
+                )
     else:
         print()
-        print("   ✅ 所有评论均无需人工复核。")
+        print("   ✅ All reviews auto-passed — no human review needed.")
 
-    print()
-
-    # ── Error log summary ─────────────────────────────────────────────
+    # ── Error log summary ──────────────────────────────────────────────────
     error_count = count_error_log_entries()
+    error_log_path = PROJECT_ROOT / "outputs" / "results" / "error_cases.jsonl"
     if error_count > 0:
-        print(f"📋 错误案例日志: outputs/results/error_cases.jsonl ({error_count} 条)")
-        print("   使用以下命令查看:")
-        print("   head -n 5 outputs/results/error_cases.jsonl")
-    else:
-        print("📋 无错误案例记录。")
-
-    print("=" * 50)
+        print()
+        print(f"📋 Error log: {error_log_path} ({error_count} entries)")
+    print("=" * 55)
 
 
 if __name__ == "__main__":

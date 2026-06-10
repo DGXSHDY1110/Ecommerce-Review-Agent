@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(autouse=True)
 def enable_mock_mode(monkeypatch):
-    """Ensure every test runs with LLM_MOCK_MODE=true."""
+    """Ensure every test runs in mock mode (V2-M1: set both canonical and legacy env vars)."""
+    monkeypatch.setenv("USE_MOCK_LLM", "true")
     monkeypatch.setenv("LLM_MOCK_MODE", "true")
 
 
@@ -177,6 +178,45 @@ class TestAnalyzeEndpoint:
         response = client.post("/api/v1/analyze", json=payload)
         assert response.status_code == 422
 
+    # ── V2-M1: New fields in analyze response ─────────────────────────────
+
+    def test_analyze_returns_evidence_field(self, client):
+        """Response must include evidence field (list)."""
+        response = client.post("/api/v1/analyze", json=make_review_payload())
+        data = response.json()
+        assert "evidence" in data, "Missing evidence field"
+        assert isinstance(data["evidence"], list)
+
+    def test_analyze_returns_llm_mode_field(self, client):
+        """Response must include llm_mode field."""
+        response = client.post("/api/v1/analyze", json=make_review_payload())
+        data = response.json()
+        assert "llm_mode" in data, "Missing llm_mode field"
+        assert data["llm_mode"] in ("real", "mock")
+
+    def test_analyze_returns_is_mock_field(self, client):
+        """Response must include is_mock boolean field."""
+        response = client.post("/api/v1/analyze", json=make_review_payload())
+        data = response.json()
+        assert "is_mock" in data, "Missing is_mock field"
+        assert isinstance(data["is_mock"], bool)
+
+    def test_analyze_returns_model_field(self, client):
+        """Response must include model string field."""
+        response = client.post("/api/v1/analyze", json=make_review_payload())
+        data = response.json()
+        assert "model" in data, "Missing model field"
+        assert isinstance(data["model"], str)
+        assert len(data["model"]) > 0
+
+    def test_analyze_mock_mode_has_is_mock_true(self, client):
+        """In mock mode, is_mock should be True and llm_mode should be 'mock'."""
+        response = client.post("/api/v1/analyze", json=make_review_payload())
+        data = response.json()
+        assert data["is_mock"] is True
+        assert data["llm_mode"] == "mock"
+        assert data["model"] == "mock-rule-engine"
+
 
 # ── Batch analyze endpoint ────────────────────────────────────────────────────
 
@@ -242,6 +282,36 @@ class TestAnalyzeBatchEndpoint:
         data = response.json()
         assert data["total"] == 1
         assert len(data["results"]) == 1
+
+    # ── V2-M1: New batch response fields ──────────────────────────────────
+
+    def test_analyze_batch_returns_real_count(self, client):
+        """Batch response must include real_count field."""
+        response = client.post("/api/v1/analyze_batch", json=self.make_batch_payload())
+        data = response.json()
+        assert "real_count" in data, "Missing real_count field"
+        assert isinstance(data["real_count"], int)
+
+    def test_analyze_batch_returns_mock_count(self, client):
+        """Batch response must include mock_count field."""
+        response = client.post("/api/v1/analyze_batch", json=self.make_batch_payload())
+        data = response.json()
+        assert "mock_count" in data, "Missing mock_count field"
+        assert isinstance(data["mock_count"], int)
+
+    def test_analyze_batch_returns_error_count(self, client):
+        """Batch response must include error_count field."""
+        response = client.post("/api/v1/analyze_batch", json=self.make_batch_payload())
+        data = response.json()
+        assert "error_count" in data, "Missing error_count field"
+        assert isinstance(data["error_count"], int)
+
+    def test_analyze_batch_mock_count_matches_total(self, client):
+        """In mock mode, mock_count should equal total."""
+        response = client.post("/api/v1/analyze_batch", json=self.make_batch_payload())
+        data = response.json()
+        assert data["mock_count"] == data["total"]
+        assert data["real_count"] == 0
 
 
 # ── Security: no sensitive data in responses ───────────────────────────────────

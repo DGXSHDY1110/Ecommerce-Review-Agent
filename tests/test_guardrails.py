@@ -39,8 +39,16 @@ def make_analysis(
     suggested_action_zh: str = "测试建议。",
     confidence: float = 0.9,
     needs_human_review: bool = False,
+    evidence: list[str] | None = None,
 ) -> ReviewAnalysis:
-    """Create a ReviewAnalysis with specified fields."""
+    """Create a ReviewAnalysis with specified fields.
+
+    V2-M1: evidence defaults to a non-empty list so existing tests that expect
+    guardrails to pass still work.  Explicit evidence=[] triggers the new
+    empty-evidence guardrail.
+    """
+    if evidence is None:
+        evidence = ["test evidence phrase from review"]
     return ReviewAnalysis(
         review_id=review_id,
         sentiment=sentiment,
@@ -51,6 +59,7 @@ def make_analysis(
         suggested_action_zh=suggested_action_zh,
         confidence=confidence,
         needs_human_review=needs_human_review,
+        evidence=evidence,
     )
 
 
@@ -317,6 +326,45 @@ class TestCombinedGuardrails:
             priority="high",
             confidence=0.9,
             needs_human_review=True,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is True
+
+
+# ── Rule 6 (V2-M1): Empty evidence ────────────────────────────────────────────
+
+class TestEvidenceGuardrail:
+    """Empty evidence → needs_human_review = True."""
+
+    def test_empty_evidence_flags(self):
+        """evidence=[] → flagged for human review."""
+        review = make_review(rating=4)
+        analysis = make_analysis(
+            evidence=[],
+            confidence=0.9,
+            needs_human_review=False,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is True
+
+    def test_non_empty_evidence_passes(self):
+        """evidence with content → not flagged by this rule."""
+        review = make_review(rating=4)
+        analysis = make_analysis(
+            evidence=["battery drains fast"],
+            confidence=0.9,
+            needs_human_review=False,
+        )
+        result = apply_guardrails(review, analysis)
+        assert result.needs_human_review is False
+
+    def test_empty_evidence_with_other_issues(self):
+        """Empty evidence combined with other guardrail triggers."""
+        review = make_review(rating=2)
+        analysis = make_analysis(
+            evidence=[],
+            confidence=0.5,  # also triggers low confidence
+            needs_human_review=False,
         )
         result = apply_guardrails(review, analysis)
         assert result.needs_human_review is True

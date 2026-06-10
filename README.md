@@ -53,6 +53,104 @@ This project demonstrates an AI-powered automation pipeline that:
 - [x] **API key redaction** in error logs (no secrets in log files)
 - [x] **Interview documentation** (interview_notes.md with detailed Chinese answers, demo_checklist.md with guardrails demo)
 
+## V2-M1: Schema / Config / Guardrails Upgrade (2026-06-10)
+
+The V2-M1 milestone hardens the project against the audit findings — the output now looks like a real AI product rather than a proof-of-concept:
+
+### New Output Fields
+
+Each `ReviewAnalysis` now includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `evidence` | `list[str]` | Verbatim phrases from `review_text` that support the classification. Empty list triggers `needs_human_review=true` via guardrail Rule 6. |
+| `llm_mode` | `Literal["real", "mock"]` | `"real"` for DeepSeek LLM; `"mock"` for explicit mock/test path. |
+| `is_mock` | `bool` | `true` when `llm_mode="mock"`; `false` when `llm_mode="real"`. Callers can distinguish mock from real results. |
+| `model` | `str` | `DEEPSEEK_MODEL` value for real; `"mock-rule-engine"` for mock. |
+| `processing_time_ms` | `float \| None` | Optional processing time for performance tracking. |
+
+### Strict Enum Validation
+
+`sentiment`, `issue_category`, `priority`, `responsible_team` now use Pydantic `Literal` types — invalid values (e.g. `"angry"`, `"shipping"`, `"urgent"`) are rejected at the schema level, not silently accepted as bare strings.
+
+### Batch Response Enhancements
+
+`BatchAnalysisResponse` now includes `error_count`, `real_count`, and `mock_count` for at-a-glance observability.
+
+### Config Changes
+
+| Env Var | Default | Notes |
+|---------|---------|-------|
+| `DEEPSEEK_MODEL` | `deepseek-v4-pro` | Changed from `deepseek-v4-flash` |
+| `USE_MOCK_LLM` | `false` | Canonical mock toggle (higher priority than legacy `LLM_MOCK_MODE`) |
+| `LOW_RATING_THRESHOLD` | `2` | Now configurable via env |
+| `LOG_LEVEL` | `INFO` | Configurable log level |
+
+### Guardrail Rule 6: Empty Evidence
+
+If `evidence` is an empty list, the result is flagged `needs_human_review=true`. This closes the gap where a result could pass with high confidence but no supporting evidence.
+
+### Error Logging Cleanup
+
+`high_priority_noted` guardrail triggers are no longer written to `error_cases.jsonl` (they were noise — 90%+ of the log). Only genuine errors (API failures, parse failures, validation failures, fallback usage) are recorded.
+
+### Important Notes
+
+- **Real LLM call is NOT yet the default** — the auto-fallback behavior when no API key is present still exists. Full enforcement of "error on missing key" comes in V2-M2.
+- **Mock mode** remains available via `USE_MOCK_LLM=true` or `--mock` CLI flag. Mock results are now clearly marked `llm_mode="mock"`, `is_mock=true`.
+- **Tests** run exclusively in mock mode (176 tests, all passing). No real API calls are made from pytest.
+
+## V2-M2: Real DeepSeek V4 Pro Integration (2026-06-10)
+
+The V2-M2 milestone makes real LLM the default — no more silent mock fallback:
+
+### Mode Selection
+
+| Scenario | Behavior |
+|----------|----------|
+| `USE_MOCK_LLM=false` + valid `DEEPSEEK_API_KEY` | **Real LLM** — calls DeepSeek V4 Pro |
+| `USE_MOCK_LLM=false` + missing `DEEPSEEK_API_KEY` | **Error** — exits with clear message, no silent fallback |
+| `USE_MOCK_LLM=true` or `--mock` | **Mock** — keyword-based classification (tests/offline demos only) |
+
+### Real LLM Flow
+
+```
+review_text → LLM API call → extract_json → Pydantic validate
+  → inject llm_mode/model/processing_time_ms → guardrails → return
+```
+
+- JSON parse failure → auto-retry once (2 total attempts)
+- Pydantic validation failure → auto-retry once
+- Both exhausted → safe fallback (`needs_human_review=true`, written to `error_cases.jsonl`)
+
+### Mock Output Improvements
+
+- `summary_zh` uses natural Chinese (no more "评分X" templates)
+- `suggested_action_zh` never exposes "unknown" team — generic human-review wording instead
+- Mock results clearly marked `is_mock=true`, `llm_mode="mock"`, `model="mock-rule-engine"`
+
+### Running
+
+```bash
+# Real LLM (default — requires DEEPSEEK_API_KEY in .env)
+python scripts/run_batch.py --input data/mock/sample_reviews.csv --limit 3
+
+# Smoke test: analyze 3 reviews with real DeepSeek V4 Pro
+python scripts/run_batch.py --limit 3
+
+# Explicit mock mode
+python scripts/run_batch.py --mock
+
+# Demo script (calls local FastAPI only)
+python scripts/demo_request.py --mode single
+python scripts/demo_request.py --mode batch
+```
+
+### New Tests
+
+- `tests/test_llm_client.py` — 26 tests covering real mode via monkeypatch (valid responses, JSON extraction, retry, fallback, HTTP errors, missing API key, mock quality)
+- All tests run without real API calls (176 tests total)
+
 ## Quick Start
 
 ```bash
@@ -158,11 +256,16 @@ Expected output (mock mode):
   "summary_zh": "用户反馈电池相关问题，评分2。",
   "suggested_action_zh": "建议product团队查看该评论，确认是否需要跟进处理。",
   "confidence": 0.85,
-  "needs_human_review": false
+  "needs_human_review": false,
+  "evidence": ["battery", "drain"],
+  "llm_mode": "mock",
+  "is_mock": true,
+  "model": "mock-rule-engine",
+  "processing_time_ms": null
 }
 ```
 
-> **Note**: Confidence varies by review clarity. Clear reviews get 0.80–0.85 (auto-pass); vague/unclassifiable reviews get 0.50 (human review).
+> **Note**: The `llm_mode`, `is_mock`, `model`, and `processing_time_ms` fields are injected by the Python code (not by the LLM). In mock mode, `evidence` is extracted via keyword matching; real LLM mode produces evidence from the model output. Empty `evidence` triggers `needs_human_review=true` (V2-M1 guardrail Rule 6).
 
 ### Analyze a Batch of Reviews
 
@@ -325,7 +428,12 @@ These are documented as future extensions in `n8n/workflow_design.md`.
 | 3 | FastAPI analysis endpoints (`/analyze`, `/analyze_batch`) | ✅ Done |
 | 4 | n8n workflow design and integration | ✅ Done |
 | 5 | Guardrails, retry logic, error handling | ✅ Done |
-| 6 | Interview packaging (docs, screenshots, demo script) | ⬜ |
+| V2-M1 | Schema / Config / Guardrails upgrade (Literal enums, evidence, is_mock, error log cleanup) | ✅ Done |
+| V2-M2 | Real DeepSeek V4 Pro as default (no silent mock fallback, 176 tests) | ✅ Done |
+| V2-M3 | Real data (30-50 reviews, multi-language) | ⬜ Next |
+| V2-M3 | Real data (30-50 reviews, multi-language) | ⬜ |
+| V2-M4 | n8n production workflow (IF nodes, error routing, Feishu) | ⬜ |
+| V2-M5 | Interview packaging (tests, screenshots, README consistency) | ⬜ |
 
 ## Project Structure
 

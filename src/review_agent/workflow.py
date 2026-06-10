@@ -5,6 +5,11 @@ Coordinates the steps: read reviews → call LLM → apply guardrails → return
 This module is the **Agentic Workflow** layer: it wires together the LLM client
 and the deterministic guardrail rules, but does NOT make HTTP calls or contain
 business logic itself.  Each function is a pure orchestrator.
+
+V2-M1 changes:
+- Added Rule 6: empty evidence → needs_human_review=true.
+- high_priority_noted is NO LONGER written to error_cases.jsonl (it was noise).
+- BatchAnalysisResponse now includes error_count, real_count, mock_count.
 """
 
 import logging
@@ -29,6 +34,7 @@ def apply_guardrails(
     review: ReviewInput,
     analysis: ReviewAnalysis,
     confidence_threshold: Optional[float] = None,
+    low_rating_threshold: Optional[int] = None,
 ) -> ReviewAnalysis:
     """Apply post-hoc guardrail rules to an analysis result.
 
@@ -39,29 +45,34 @@ def apply_guardrails(
     Rules (applied in order):
 
     1. **Low confidence** — if ``confidence < threshold``, flag for human review.
-    2. **Rating/sentiment contradiction** — if ``rating <= 2`` but sentiment is
+    2. **Rating/sentiment contradiction** — if ``rating <= threshold`` but sentiment is
        not ``negative``, flag for human review.
     3. **Uncertain category with low rating** — if ``issue_category == "other"``
-       AND ``rating <= 2``, flag for human review.
+       AND ``rating <= threshold``, flag for human review.
     4. **Missing Chinese summaries** — if ``summary_zh`` or ``suggested_action_zh``
        is empty / whitespace-only, flag for human review.
-    5. **High priority** — high-priority results keep their existing
-       ``needs_human_review`` state, but we log a note encouraging manual
-       verification.
+    5. **High priority noted** — high-priority results are logged for observability
+       but NOT written to error_cases.jsonl (V2-M1 fix).
+    6. **Empty evidence** — if ``evidence`` list is empty, flag for human review.
 
     Args:
         review:              The original review input.
         analysis:            The LLM-produced (or mock) analysis result.
         confidence_threshold: Override the confidence threshold from config.
                               Defaults to ``Settings.confidence_threshold`` (0.6).
+        low_rating_threshold: Override the low-rating threshold from config.
+                              Defaults to ``Settings.low_rating_threshold`` (2).
 
     Returns:
         The same ``ReviewAnalysis`` instance, mutated in-place with
         ``needs_human_review`` potentially set to ``True``.
     """
-    if confidence_threshold is None:
+    if confidence_threshold is None or low_rating_threshold is None:
         settings = get_settings()
-        confidence_threshold = settings.confidence_threshold
+        if confidence_threshold is None:
+            confidence_threshold = settings.confidence_threshold
+        if low_rating_threshold is None:
+            low_rating_threshold = settings.low_rating_threshold
 
     triggered_rules: list[str] = []
 
@@ -72,13 +83,13 @@ def apply_guardrails(
             triggered_rules.append("low_confidence")
 
     # ── Rule 2: Rating / sentiment contradiction ─────────────────────────
-    if review.rating <= 2 and analysis.sentiment != "negative":
+    if review.rating <= low_rating_threshold and analysis.sentiment != "negative":
         if not analysis.needs_human_review:
             analysis.needs_human_review = True
         triggered_rules.append("rating_sentiment_contradiction")
 
     # ── Rule 3: "other" category with low rating ─────────────────────────
-    if analysis.issue_category == "other" and review.rating <= 2:
+    if analysis.issue_category == "other" and review.rating <= low_rating_threshold:
         if not analysis.needs_human_review:
             analysis.needs_human_review = True
         triggered_rules.append("other_category_low_rating")
@@ -96,7 +107,7 @@ def apply_guardrails(
         else:
             triggered_rules.append("empty_suggested_action")
 
-    # ── Rule 5: High priority — log and preserve existing flag ────────────
+    # ── Rule 5: High priority — log for observability, DO NOT write error log ──
     if analysis.priority == "high":
         triggered_rules.append("high_priority_noted")
         # We keep the existing needs_human_review state; the other rules may
@@ -110,18 +121,26 @@ def apply_guardrails(
             analysis.needs_human_review,
         )
 
-    # ── Log guardrail triggers to error_cases.jsonl ──────────────────────
+    # ── Rule 6 (V2-M1): Empty evidence ───────────────────────────────────
+    if not analysis.evidence:
+        if not analysis.needs_human_review:
+            analysis.needs_human_review = True
+        triggered_rules.append("empty_evidence")
+
+    # ── Log guardrail triggers ───────────────────────────────────────────
     if triggered_rules:
         logger.info(
             "Guardrails triggered for review %s: %s",
             analysis.review_id, ", ".join(triggered_rules),
         )
         # Only log to error_cases when human review is actually required
-        if analysis.needs_human_review:
+        # AND the trigger is NOT just high_priority_noted (V2-M1: exclude noise)
+        real_triggers = [r for r in triggered_rules if r != "high_priority_noted"]
+        if analysis.needs_human_review and real_triggers:
             log_error_case(
                 review_id=analysis.review_id,
                 error_type="GUARDRAIL_TRIGGERED",
-                error_message=f"Rules: {', '.join(triggered_rules)}",
+                error_message=f"Rules: {', '.join(real_triggers)}",
                 fallback_used=False,
                 needs_human_review=True,
             )
@@ -205,6 +224,10 @@ def analyze_reviews_batch(
                     suggested_action_zh="请人工查看该评论并确认分类结果。",
                     confidence=0.0,
                     needs_human_review=True,
+                    evidence=[],
+                    llm_mode="real",
+                    is_mock=False,
+                    model=client.model if client else "unknown",
                 )
             )
     return results
@@ -226,8 +249,30 @@ def analyze_batch_request(
     results = analyze_reviews_batch(request.reviews, client=client)
     needs_human_review_count = sum(1 for r in results if r.needs_human_review)
 
+    # V2-M1: compute real/mock/error counts
+    real_count = sum(1 for r in results if r.llm_mode == "real")
+    mock_count = sum(1 for r in results if r.llm_mode == "mock")
+
+    # Error count: results where fallback was used (confidence=0.0 AND
+    # summary indicates a failure)
+    def _is_error_result(r: ReviewAnalysis) -> bool:
+        if r.confidence != 0.0:
+            return False
+        # Check for known error/fallback markers in summary
+        summary = r.summary_zh
+        return (
+            "AI 解析失败" in summary
+            or "安全兜底" in summary
+            or "分析过程发生异常" in summary
+        )
+
+    error_count = sum(1 for r in results if _is_error_result(r))
+
     return BatchAnalysisResponse(
         results=results,
         total=len(results),
         needs_human_review_count=needs_human_review_count,
+        error_count=error_count,
+        real_count=real_count,
+        mock_count=mock_count,
     )

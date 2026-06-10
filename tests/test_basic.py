@@ -58,7 +58,7 @@ def test_config_import():
     assert settings.app_host == "0.0.0.0"
     assert settings.app_port == 8000
     assert settings.deepseek_base_url == "https://api.deepseek.com"
-    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_model == "deepseek-v4-pro"
 
 
 def test_llm_client_import():
@@ -69,7 +69,7 @@ def test_llm_client_import():
     mock_settings = Settings()
     mock_settings.llm_mock_mode = True
     client = LLMClient(settings=mock_settings)
-    assert client.model == "deepseek-v4-flash"
+    assert client.model == "deepseek-v4-pro"
     assert client.mock_mode is True
 
 
