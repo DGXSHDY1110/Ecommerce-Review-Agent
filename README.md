@@ -193,6 +193,39 @@ After running `python scripts/run_batch.py --mock`:
 | `outputs/results/review_analysis.json` | Full JSON results with all classifications |
 | `outputs/reports/daily_report.md` | Chinese Markdown daily report with statistics |
 
+## Review Data
+
+This project ships with two review datasets:
+
+| File | Purpose | Rows | Languages |
+|------|---------|------|-----------|
+| `data/mock/sample_reviews.csv` | Minimal test data for quick verification | 10 | EN |
+| `data/real_reviews_sample.csv` | **Public-review-style / sanitized demo sample** — realistic cross-border e-commerce reviews for interview demos and batch analysis testing | 42 | EN, DE, JP, FR, ES |
+
+### real_reviews_sample.csv coverage
+
+The sample covers all 8 issue categories (`battery`, `logistics`, `product_quality`, `image_quality`, `customer_service`, `price`, `description_mismatch`, `other`), 9 camera-related products, and 5 languages. It also includes edge cases: very short reviews, multi-issue reviews, contradictions (low rating + positive text), non-English reviews, and information-insufficient reviews.
+
+**Important disclaimers:**
+- This sample does **NOT** contain real user personal information (no PII, no order numbers, no email addresses).
+- This sample is **NOT** directly scraped from Amazon or any other platform.
+- It is a sanitized, public-review-style demonstration dataset designed for interview scenarios.
+- In production, you would replace this with real data from Amazon SP-API, Shopify Admin API, Feishu multi-dimensional tables, or customer service ticketing systems.
+
+### CSV Preparation Script
+
+If you have an external CSV with different column names, use the preparation script to standardise it:
+
+```bash
+python scripts/prepare_real_reviews.py --input external_reviews.csv --output data/my_reviews.csv --force
+```
+
+The script handles:
+- Field name aliases (`id` → `review_id`, `source` → `platform`, `stars` → `rating`, etc.)
+- Invalid rating filtering (non 1-5 values dropped)
+- Empty review_text filtering
+- Auto-generated review_id for rows without one
+
 ## FastAPI Service (Milestone 3)
 
 ### Start the Server

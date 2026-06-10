@@ -71,3 +71,4 @@ outputs/
 *.sqlite
 *.db
 Thumbs.db
+data/
